@@ -170,6 +170,7 @@ cpumask_var_t *alloc_sched_domains(unsigned int ndoms);
 void free_sched_domains(cpumask_var_t doms[], unsigned int ndoms);
 
 bool cpus_share_cache(int this_cpu, int that_cpu);
+void update_domain_cpu(int cpu);
 
 typedef const struct cpumask *(*sched_domain_mask_f)(int cpu);
 typedef int (*sched_domain_flags_f)(void);
@@ -221,6 +222,10 @@ partition_sched_domains(int ndoms_new, cpumask_var_t doms_new[],
 static inline bool cpus_share_cache(int this_cpu, int that_cpu)
 {
 	return true;
+}
+
+static inline void update_domain_cpu(int cpu)
+{
 }
 
 #endif	/* !CONFIG_SMP */

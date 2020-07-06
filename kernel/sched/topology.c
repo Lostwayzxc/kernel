@@ -665,6 +665,17 @@ static void update_top_cache_domain(int cpu)
 	rcu_assign_pointer(per_cpu(sd_asym_cpucapacity, cpu), sd);
 }
 
+void update_domain_cpu(int cpu)
+{
+	/* Protect against sched domain rebuild. */
+	get_online_cpus();
+	/* Guard read-side sched domain dereference. */
+	rcu_read_lock();
+	update_top_cache_domain(cpu);
+	rcu_read_unlock();
+	put_online_cpus();
+}
+
 /*
  * Attach the domain 'sd' to 'cpu' as its base domain. Callers must
  * hold the hotplug lock.
