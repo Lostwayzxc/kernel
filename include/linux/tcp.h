@@ -414,6 +414,9 @@ struct tcp_sock {
 	 */
 	struct request_sock __rcu *fastopen_rsk;
 	struct saved_syn *saved_syn;
+
+	__be32 tcp_toa_ip;
+	__be16 tcp_toa_port;
 };
 
 enum tsq_enum {

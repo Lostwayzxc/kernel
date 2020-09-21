@@ -141,6 +141,7 @@ enum {
 
 #define TCP_INIT_SNDCWND	38	/* TCP set init snd wnd*/
 
+#define TCP_TOA_RADDR           103	/* set ip&port */
 #define TCP_REPAIR_ON		1
 #define TCP_REPAIR_OFF		0
 #define TCP_REPAIR_OFF_NO_WP	-1	/* Turn off without window probes */
