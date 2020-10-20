@@ -3901,6 +3901,7 @@ union bpf_attr {
 	FN(this_cpu_ptr),		\
 	FN(redirect_peer),		\
 	FN(biggest_bits),		\
+	FN(unsafe_helper),
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
@@ -4267,6 +4268,15 @@ enum xdp_action {
 	XDP_PASS,
 	XDP_TX,
 	XDP_REDIRECT,
+};
+
+struct bpf_unsafe_ctx {
+	void *ctx;
+	__u16 mod;
+	__u16 cmd;
+	__u16 flags;
+	__u16 data_len;
+	char data[0];
 };
 
 /* user accessible metadata for XDP packet hook

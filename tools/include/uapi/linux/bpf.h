@@ -3900,6 +3900,7 @@ union bpf_attr {
 	FN(per_cpu_ptr),		\
 	FN(this_cpu_ptr),		\
 	FN(redirect_peer),		\
+	FN(unsafe_helper),		\
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
