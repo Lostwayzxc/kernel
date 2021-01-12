@@ -51,7 +51,7 @@ static void *vcpu_worker(void *data)
 
 		clock_gettime(CLOCK_MONOTONIC, &start);
 		ret = _vcpu_run(vm, vcpu_id);
-		ts_diff = timespec_diff_now(start);
+		ts_diff = timespec_elapsed(start);
 
 		TEST_ASSERT(ret == 0, "vcpu_run failed: %d\n", ret);
 		TEST_ASSERT(get_ucall(vm, vcpu_id, NULL) == UCALL_SYNC,
@@ -154,7 +154,7 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 		pr_debug("Waiting for vcpu_last_completed_iteration == %lu\n",
 			iteration);
 
-	ts_diff = timespec_diff_now(start);
+	ts_diff = timespec_elapsed(start);
 	pr_info("Populate memory time: %ld.%.9lds\n",
 		ts_diff.tv_sec, ts_diff.tv_nsec);
 
@@ -162,7 +162,7 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	vm_mem_region_set_flags(vm, PERF_TEST_MEM_SLOT_INDEX,
 				KVM_MEM_LOG_DIRTY_PAGES);
-	ts_diff = timespec_diff_now(start);
+	ts_diff = timespec_elapsed(start);
 	pr_info("Enabling dirty logging time: %ld.%.9lds\n\n",
 		ts_diff.tv_sec, ts_diff.tv_nsec);
 
@@ -181,7 +181,7 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 					 vcpu_id, iteration);
 		}
 
-		ts_diff = timespec_diff_now(start);
+		ts_diff = timespec_elapsed(start);
 		vcpu_dirty_total = timespec_add(vcpu_dirty_total, ts_diff);
 		pr_info("Iteration %lu dirty memory time: %ld.%.9lds\n",
 			iteration, ts_diff.tv_sec, ts_diff.tv_nsec);
@@ -189,7 +189,7 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 		clock_gettime(CLOCK_MONOTONIC, &start);
 		kvm_vm_get_dirty_log(vm, PERF_TEST_MEM_SLOT_INDEX, bmap);
 
-		ts_diff = timespec_diff_now(start);
+		ts_diff = timespec_elapsed(start);
 		get_dirty_log_total = timespec_add(get_dirty_log_total,
 						   ts_diff);
 		pr_info("Iteration %lu get dirty log time: %ld.%.9lds\n",
@@ -200,7 +200,7 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 		kvm_vm_clear_dirty_log(vm, PERF_TEST_MEM_SLOT_INDEX, bmap, 0,
 				       host_num_pages);
 
-		ts_diff = timespec_diff_now(start);
+		ts_diff = timespec_elapsed(start);
 		clear_dirty_log_total = timespec_add(clear_dirty_log_total,
 						     ts_diff);
 		pr_info("Iteration %lu clear dirty log time: %ld.%.9lds\n",
@@ -216,7 +216,7 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 	/* Disable dirty logging */
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	vm_mem_region_set_flags(vm, PERF_TEST_MEM_SLOT_INDEX, 0);
-	ts_diff = timespec_diff_now(start);
+	ts_diff = timespec_elapsed(start);
 	pr_info("Disabling dirty logging time: %ld.%.9lds\n",
 		ts_diff.tv_sec, ts_diff.tv_nsec);
 
