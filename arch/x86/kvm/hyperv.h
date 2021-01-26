@@ -55,7 +55,7 @@ static inline struct kvm_hv *to_kvm_hv(struct kvm *kvm)
 	return &kvm->arch.hyperv;
 }
 
-static inline struct kvm_vcpu_hv *vcpu_to_hv_vcpu(struct kvm_vcpu *vcpu)
+static inline struct kvm_vcpu_hv *to_hv_vcpu(struct kvm_vcpu *vcpu)
 {
 	return &vcpu->arch.hyperv;
 }
@@ -105,7 +105,7 @@ bool kvm_hv_get_assist_page(struct kvm_vcpu *vcpu,
 static inline struct kvm_vcpu_hv_stimer *vcpu_to_stimer(struct kvm_vcpu *vcpu,
 							int timer_index)
 {
-	return &vcpu_to_hv_vcpu(vcpu)->stimer[timer_index];
+	return &to_hv_vcpu(vcpu)->stimer[timer_index];
 }
 
 static inline struct kvm_vcpu *stimer_to_vcpu(struct kvm_vcpu_hv_stimer *stimer)
