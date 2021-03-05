@@ -2440,6 +2440,15 @@ static int make_mmu_pages_available(struct kvm_vcpu *vcpu)
 
 	kvm_mmu_zap_oldest_mmu_pages(vcpu->kvm, KVM_REFILL_PAGES - avail);
 
+	/*
+	 * Note, this check is intentionally soft, it only guarantees that one
+	 * page is available, while the caller may end up allocating as many as
+	 * four pages, e.g. for PAE roots or for 5-level paging.  Temporarily
+	 * exceeding the (arbitrary by default) limit will not harm the host,
+	 * being too agressive may unnecessarily kill the guest, and getting an
+	 * exact count is far more trouble than it's worth, especially in the
+	 * page fault paths.
+	 */
 	if (!kvm_mmu_available_pages(vcpu->kvm))
 		return -ENOSPC;
 	return 0;
@@ -3219,16 +3228,9 @@ static hpa_t mmu_alloc_root(struct kvm_vcpu *vcpu, gfn_t gfn, gva_t gva,
 {
 	struct kvm_mmu_page *sp;
 
-	write_lock(&vcpu->kvm->mmu_lock);
-
-	if (make_mmu_pages_available(vcpu)) {
-		write_unlock(&vcpu->kvm->mmu_lock);
-		return INVALID_PAGE;
-	}
 	sp = kvm_mmu_get_page(vcpu, gfn, gva, level, direct, ACC_ALL);
 	++sp->root_count;
 
-	write_unlock(&vcpu->kvm->mmu_lock);
 	return __pa(sp->spt);
 }
 
@@ -3248,15 +3250,9 @@ static int mmu_alloc_direct_roots(struct kvm_vcpu *vcpu)
 	if (vcpu->kvm->arch.tdp_mmu_enabled) {
 		root = kvm_tdp_mmu_get_vcpu_root_hpa(vcpu);
 
-		if (!VALID_PAGE(root))
-			return -ENOSPC;
 		mmu->root_hpa = root;
 	} else if (shadow_root_level >= PT64_ROOT_4LEVEL) {
-		root = mmu_alloc_root(vcpu, 0, 0, shadow_root_level,
-				      true);
-
-		if (!VALID_PAGE(root))
-			return -ENOSPC;
+		root = mmu_alloc_root(vcpu, 0, 0, shadow_root_level, true);
 		mmu->root_hpa = root;
 	} else if (shadow_root_level == PT32E_ROOT_LEVEL) {
 		if (WARN_ON_ONCE(!mmu->pae_root)) {
@@ -3269,8 +3265,6 @@ static int mmu_alloc_direct_roots(struct kvm_vcpu *vcpu)
 
 			root = mmu_alloc_root(vcpu, i << (30 - PAGE_SHIFT),
 					      i << 30, PT32_ROOT_LEVEL, true);
-			if (!VALID_PAGE(root))
-				return -ENOSPC;
 			mmu->pae_root[i] = root | PT_PRESENT_MASK |
 					   shadow_me_mask;
 		}
@@ -3317,8 +3311,6 @@ static int mmu_alloc_shadow_roots(struct kvm_vcpu *vcpu)
 
 		root = mmu_alloc_root(vcpu, root_gfn, 0,
 				      mmu->shadow_root_level, false);
-		if (!VALID_PAGE(root))
-			return -ENOSPC;
 		mmu->root_hpa = root;
 		goto set_root_pgd;
 	}
@@ -3354,6 +3346,7 @@ static int mmu_alloc_shadow_roots(struct kvm_vcpu *vcpu)
 
 	for (i = 0; i < 4; ++i) {
 		MMU_WARN_ON(VALID_PAGE(mmu->pae_root[i]));
+
 		if (mmu->root_level == PT32E_ROOT_LEVEL) {
 			pdptr = mmu->get_pdptr(vcpu, i);
 			if (!(pdptr & PT_PRESENT_MASK)) {
@@ -3367,8 +3360,6 @@ static int mmu_alloc_shadow_roots(struct kvm_vcpu *vcpu)
 
 		root = mmu_alloc_root(vcpu, root_gfn, i << 30,
 				      PT32_ROOT_LEVEL, false);
-		if (!VALID_PAGE(root))
-			return -ENOSPC;
 		mmu->pae_root[i] = root | pm_mask;
 	}
 
@@ -3453,14 +3444,6 @@ err_pml4:
 	free_page((unsigned long)pae_root);
 	return -ENOMEM;
 #endif
-}
-
-static int mmu_alloc_roots(struct kvm_vcpu *vcpu)
-{
-	if (vcpu->arch.mmu->direct_map)
-		return mmu_alloc_direct_roots(vcpu);
-	else
-		return mmu_alloc_shadow_roots(vcpu);
 }
 
 void kvm_mmu_sync_roots(struct kvm_vcpu *vcpu)
@@ -4956,7 +4939,10 @@ int kvm_mmu_load(struct kvm_vcpu *vcpu)
 	r = mmu_alloc_special_roots(vcpu);
 	if (r)
 		goto out;
-	r = mmu_alloc_roots(vcpu);
+	if (vcpu->arch.mmu->direct_map)
+		r = mmu_alloc_direct_roots(vcpu);
+	else
+		r = mmu_alloc_shadow_roots(vcpu);
 	kvm_mmu_sync_roots(vcpu);
 	if (r)
 		goto out;
