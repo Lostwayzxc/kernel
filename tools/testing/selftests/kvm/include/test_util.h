@@ -100,6 +100,7 @@ const struct vm_mem_backing_src_alias *vm_mem_backing_src_alias(uint32_t i);
 size_t get_backing_src_pagesz(uint32_t i);
 bool thp_configured(void);
 size_t get_trans_hugepagesz(void);
+size_t get_def_hugetlb_pagesz(void);
 void backing_src_help(void);
 enum vm_mem_backing_src_type parse_backing_src_type(const char *type_name);
 
