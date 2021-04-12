@@ -23,9 +23,11 @@
 #include <linux/uio.h>
 #include <linux/vdpa.h>
 #include <linux/nospec.h>
+#include <linux/vringh.h>
 #include <uapi/linux/vduse.h>
 #include <uapi/linux/vdpa.h>
 #include <uapi/linux/virtio_config.h>
+#include <uapi/linux/virtio_blk.h>
 #include <linux/mod_devicetable.h>
 
 #include "iova_domain.h"
@@ -47,6 +49,13 @@ struct vduse_virtqueue {
 	struct work_struct inject;
 	struct kobject kobj;
 	int irq_affinity;
+	u32 num;
+	u64 desc_addr;
+	u64 device_addr;
+	u64 driver_addr;
+	struct vringh vring;
+	struct vringh_kiov in_iov;
+	struct vringh_kiov out_iov;
 };
 
 struct vduse_dev;
@@ -81,6 +90,10 @@ struct vduse_dev {
 	u32 vq_align;
 	u32 device_id;
 	u32 vendor_id;
+	u64 features;
+	struct delayed_work timeout_work;
+	u16 dead_timeout;
+	bool dead;
 };
 
 struct vduse_dev_msg {
@@ -165,6 +178,10 @@ static int vduse_dev_msg_sync(struct vduse_dev *dev,
 {
 	init_waitqueue_head(&msg->waitq);
 	spin_lock(&dev->msg_lock);
+	if (dev->dead) {
+		msg->resp.result = VDUSE_REQUEST_FAILED;
+		goto unlock;
+	}
 	vduse_enqueue_msg(&dev->send_list, msg);
 	wake_up(&dev->waitq);
 	spin_unlock(&dev->msg_lock);
@@ -174,7 +191,10 @@ static int vduse_dev_msg_sync(struct vduse_dev *dev,
 		list_del(&msg->list);
 		msg->resp.result = VDUSE_REQUEST_FAILED;
 	}
+unlock:
 	spin_unlock(&dev->msg_lock);
+	if (!dev->dead && msg->resp.result != VDUSE_REQUEST_OK)
+		WARN(1, "vduse message (type: %d) failed\n", msg->req.type);
 
 	return (msg->resp.result == VDUSE_REQUEST_OK) ? 0 : -1;
 }
@@ -191,7 +211,7 @@ static u64 vduse_dev_get_features(struct vduse_dev *dev)
 	msg.req.type = VDUSE_GET_FEATURES;
 	msg.req.request_id = vduse_dev_get_request_id(dev);
 
-	if (WARN_ON(vduse_dev_msg_sync(dev, &msg) != 0))
+	if (vduse_dev_msg_sync(dev, &msg) != 0)
 		return 0;
 
 	return msg.resp.f.features;
@@ -215,7 +235,7 @@ static u8 vduse_dev_get_status(struct vduse_dev *dev)
 	msg.req.type = VDUSE_GET_STATUS;
 	msg.req.request_id = vduse_dev_get_request_id(dev);
 
-	if (WARN_ON(vduse_dev_msg_sync(dev, &msg) != 0))
+	if (vduse_dev_msg_sync(dev, &msg) != 0)
 		return 0;
 
 	return msg.resp.s.status;
@@ -229,7 +249,7 @@ static void vduse_dev_set_status(struct vduse_dev *dev, u8 status)
 	msg.req.request_id = vduse_dev_get_request_id(dev);
 	msg.req.s.status = status;
 
-	WARN_ON(vduse_dev_msg_sync(dev, &msg) != 0);
+	vduse_dev_msg_sync(dev, &msg);
 }
 
 static void vduse_dev_get_config(struct vduse_dev *dev, unsigned int offset,
@@ -244,7 +264,7 @@ static void vduse_dev_get_config(struct vduse_dev *dev, unsigned int offset,
 		msg.req.request_id = vduse_dev_get_request_id(dev);
 		msg.req.config.offset = offset;
 		msg.req.config.len = sz;
-		if (WARN_ON(vduse_dev_msg_sync(dev, &msg) != 0))
+		if (vduse_dev_msg_sync(dev, &msg) != 0)
 			break;
 
 		memcpy(buf, msg.resp.config.data, sz);
@@ -267,7 +287,7 @@ static void vduse_dev_set_config(struct vduse_dev *dev, unsigned int offset,
 		msg.req.config.offset = offset;
 		msg.req.config.len = sz;
 		memcpy(msg.req.config.data, buf, sz);
-		if (WARN_ON(vduse_dev_msg_sync(dev, &msg) != 0))
+		if (vduse_dev_msg_sync(dev, &msg) != 0)
 			break;
 
 		buf += sz;
@@ -286,7 +306,7 @@ static void vduse_dev_set_vq_num(struct vduse_dev *dev,
 	msg.req.vq_num.index = vq->index;
 	msg.req.vq_num.num = num;
 
-	WARN_ON(vduse_dev_msg_sync(dev, &msg) != 0);
+	vduse_dev_msg_sync(dev, &msg);
 }
 
 static int vduse_dev_set_vq_addr(struct vduse_dev *dev,
@@ -315,7 +335,7 @@ static void vduse_dev_set_vq_ready(struct vduse_dev *dev,
 	msg.req.vq_ready.index = vq->index;
 	msg.req.vq_ready.ready = ready;
 
-	WARN_ON(vduse_dev_msg_sync(dev, &msg) != 0);
+	vduse_dev_msg_sync(dev, &msg);
 }
 
 static bool vduse_dev_get_vq_ready(struct vduse_dev *dev,
@@ -326,7 +346,7 @@ static bool vduse_dev_get_vq_ready(struct vduse_dev *dev,
 	msg.req.type = VDUSE_GET_VQ_READY;
 	msg.req.request_id = vduse_dev_get_request_id(dev);
 	msg.req.vq_ready.index = vq->index;
-	if (WARN_ON(vduse_dev_msg_sync(dev, &msg)))
+	if (vduse_dev_msg_sync(dev, &msg))
 		return false;
 
 	return msg.resp.vq_ready.ready;
@@ -511,6 +531,9 @@ static int vduse_vdpa_set_vq_address(struct vdpa_device *vdpa, u16 idx,
 	struct vduse_dev *dev = vdpa_to_vduse(vdpa);
 	struct vduse_virtqueue *vq = dev->vqs[idx];
 
+	vq->desc_addr = desc_area;
+	vq->driver_addr = driver_area;
+	vq->device_addr = device_area;
 	return vduse_dev_set_vq_addr(dev, vq, desc_area,
 					driver_area, device_area);
 }
@@ -521,8 +544,14 @@ static void vduse_vdpa_kick_vq(struct vdpa_device *vdpa, u16 idx)
 	struct vduse_virtqueue *vq = dev->vqs[idx];
 
 	spin_lock(&vq->kick_lock);
-	if (vq->ready && vq->kickfd)
+	if (!vq->ready)
+		goto unlock;
+
+	if (dev->dead)
+		schedule_delayed_work(&dev->timeout_work, 0);
+	else if (vq->kickfd)
 		eventfd_signal(vq->kickfd, 1);
+unlock:
 	spin_unlock(&vq->kick_lock);
 }
 
@@ -543,6 +572,7 @@ static void vduse_vdpa_set_vq_num(struct vdpa_device *vdpa, u16 idx, u32 num)
 	struct vduse_dev *dev = vdpa_to_vduse(vdpa);
 	struct vduse_virtqueue *vq = dev->vqs[idx];
 
+	vq->num = num;
 	vduse_dev_set_vq_num(dev, vq, num);
 }
 
@@ -553,7 +583,14 @@ static void vduse_vdpa_set_vq_ready(struct vdpa_device *vdpa,
 	struct vduse_virtqueue *vq = dev->vqs[idx];
 
 	vduse_dev_set_vq_ready(dev, vq, ready);
+	mutex_lock(&dev->lock);
+	vringh_init_iotlb(&vq->vring, dev->features,
+			  vq->num, false,
+			  (struct vring_desc *)(uintptr_t)vq->desc_addr,
+			  (struct vring_avail *)(uintptr_t)vq->driver_addr,
+			  (struct vring_used *)(uintptr_t)vq->device_addr);
 	vq->ready = ready;
+	mutex_unlock(&dev->lock);
 }
 
 static bool vduse_vdpa_get_vq_ready(struct vdpa_device *vdpa, u16 idx)
@@ -604,6 +641,8 @@ static int vduse_vdpa_set_features(struct vdpa_device *vdpa, u64 features)
 
 	if (!(features & (1ULL << VIRTIO_F_ACCESS_PLATFORM)))
 		return -EINVAL;
+
+	dev->features = features;
 
 	return vduse_dev_set_features(dev, features);
 }
@@ -973,6 +1012,9 @@ static int vduse_dev_release(struct inode *inode, struct file *file)
 	spin_unlock(&dev->msg_lock);
 
 	dev->connected = false;
+	if (dev->dead_timeout && dev->device_id == VIRTIO_ID_BLOCK)
+		schedule_delayed_work(&dev->timeout_work,
+				msecs_to_jiffies(dev->dead_timeout * 1000));
 
 	return 0;
 }
@@ -984,6 +1026,10 @@ static int vduse_dev_open(struct inode *inode, struct file *file)
 	int ret = -EBUSY;
 
 	mutex_lock(&dev->lock);
+	if (dev->dead) {
+		mutex_unlock(&dev->lock);
+		return -ENODEV;
+	}
 	if (dev->connected)
 		goto unlock;
 
@@ -992,6 +1038,7 @@ static int vduse_dev_open(struct inode *inode, struct file *file)
 	file->private_data = dev;
 unlock:
 	mutex_unlock(&dev->lock);
+	cancel_delayed_work_sync(&dev->timeout_work);
 
 	return ret;
 }
@@ -1079,6 +1126,9 @@ static void vq_release(struct kobject *kobj)
 {
 	struct vduse_virtqueue *vq = container_of(kobj,
 					struct vduse_virtqueue, kobj);
+
+	vringh_kiov_cleanup(&vq->out_iov);
+	vringh_kiov_cleanup(&vq->in_iov);
 	kfree(vq);
 }
 
@@ -1121,6 +1171,10 @@ static int vduse_dev_init_vqs(struct vduse_dev *dev, u32 vq_align,
 		}
 		dev->vqs[i]->index = i;
 		dev->vqs[i]->irq_affinity = -1;
+		vringh_set_iotlb(&dev->vqs[i]->vring, dev->domain->iotlb,
+				 &dev->domain->iotlb_lock);
+		vringh_kiov_init(&dev->vqs[i]->out_iov, NULL, 0);
+		vringh_kiov_init(&dev->vqs[i]->in_iov, NULL, 0);
 		INIT_WORK(&dev->vqs[i]->inject, vduse_vq_irq_inject);
 		spin_lock_init(&dev->vqs[i]->kick_lock);
 		spin_lock_init(&dev->vqs[i]->irq_lock);
@@ -1140,6 +1194,133 @@ err:
 	return ret;
 }
 
+static int vduse_blk_timeout_handler(struct vduse_dev *dev,
+				      struct vduse_virtqueue *vq)
+{
+	size_t len = 0;
+	ssize_t bytes;
+	unsigned short head;
+	u8 status;
+	int ret;
+
+	ret = vringh_getdesc_iotlb(&vq->vring, &vq->out_iov, &vq->in_iov,
+				   &head, GFP_ATOMIC);
+	if (ret != 1)
+		return ret;
+
+	if (vq->out_iov.used < 1 || vq->in_iov.used < 1) {
+		pr_err("VDUSE: missing headers - out_iov: %u in_iov %u\n",
+		       vq->out_iov.used, vq->in_iov.used);
+		goto out;
+	}
+
+	if (vq->in_iov.iov[vq->in_iov.used - 1].iov_len < 1) {
+		pr_err("VDUSE: request in header too short\n");
+		goto out;
+	}
+
+	len = vringh_kiov_length(&vq->in_iov);
+	status = VIRTIO_BLK_S_IOERR;
+
+	vringh_kiov_advance(&vq->in_iov, len - 1);
+
+	/* Last byte is the status */
+	bytes = vringh_iov_push_iotlb(&vq->vring, &vq->in_iov, &status, 1);
+	if (bytes != 1) {
+		ret = (bytes >= 0) ? -EINVAL : bytes;
+		pr_err("VDUSE: update status failed: %ld\n", bytes);
+		goto err;
+	}
+
+	/* Make sure data is wrote before advancing index */
+	smp_wmb();
+out:
+	ret = vringh_complete_iotlb(&vq->vring, head, len);
+	if (ret) {
+		pr_err("VDUSE: update used vring failed\n");
+		goto err;
+	}
+
+	return 1;
+err:
+	vringh_abandon_iotlb(&vq->vring, 1);
+	return ret;
+}
+
+/* Returns 0 if there was no request, 1 if there was, or -errno. */
+static int vduse_req_timeout_handler(struct vduse_dev *dev,
+				      struct vduse_virtqueue *vq)
+{
+	int ret;
+	bool do_retry = true;
+
+retry:
+	ret = vduse_domain_translate_map(dev->domain);
+	if (ret) {
+		pr_err("VDUSE: translate domain mapping failed\n");
+		return ret;
+	}
+
+	if (dev->device_id == VIRTIO_ID_BLOCK)
+		ret = vduse_blk_timeout_handler(dev, vq);
+
+	if (ret < 0 && do_retry) {
+		do_retry = false;
+		goto retry;
+	}
+
+	return ret;
+}
+
+static void vduse_dev_timeout_work(struct work_struct *work)
+{
+	int i, ret;
+	struct vduse_dev_msg *msg;
+	struct vduse_dev *dev = container_of(to_delayed_work(work),
+					struct vduse_dev, timeout_work);
+
+	mutex_lock(&dev->lock);
+	if (dev->connected)
+		goto unlock;
+
+	if (!dev->dead) {
+		pr_warn("VDUSE: dead connection found in %s\n",
+			dev_name(&dev->dev));
+		flush_workqueue(vduse_irq_wq);
+		flush_workqueue(vduse_irq_bound_wq);
+	}
+	spin_lock(&dev->msg_lock);
+	dev->dead = true;
+	while ((msg = vduse_dequeue_msg(&dev->send_list))) {
+		msg->resp.result = VDUSE_REQUEST_FAILED;
+		msg->completed = 1;
+		wake_up(&msg->waitq);
+	}
+	spin_unlock(&dev->msg_lock);
+
+	for (i = 0; i < dev->vq_num; i++) {
+		if (!dev->vqs[i]->ready)
+			continue;
+
+		if (vringh_recover_iotlb(&dev->vqs[i]->vring))
+			continue;
+
+		do {
+			vringh_notify_disable_iotlb(&dev->vqs[i]->vring);
+			while ((ret = vduse_req_timeout_handler(dev,
+				dev->vqs[i])) == 1)
+				;
+		} while (!vringh_notify_enable_iotlb(&dev->vqs[i]->vring) &&
+			 ret >= 0);
+		spin_lock_irq(&dev->vqs[i]->irq_lock);
+		if (dev->vqs[i]->cb.callback)
+			dev->vqs[i]->cb.callback(dev->vqs[i]->cb.private);
+		spin_unlock_irq(&dev->vqs[i]->irq_lock);
+	}
+unlock:
+	mutex_unlock(&dev->lock);
+}
+
 static struct vduse_dev *vduse_dev_create(void)
 {
 	struct vduse_dev *dev = kzalloc(sizeof(*dev), GFP_KERNEL);
@@ -1156,6 +1337,7 @@ static struct vduse_dev *vduse_dev_create(void)
 
 	INIT_WORK(&dev->inject, vduse_dev_irq_inject);
 	init_waitqueue_head(&dev->waitq);
+	INIT_DELAYED_WORK(&dev->timeout_work, vduse_dev_timeout_work);
 
 	return dev;
 }
@@ -1192,6 +1374,7 @@ static int vduse_destroy_dev(char *name)
 	}
 	dev->connected = true;
 	mutex_unlock(&dev->lock);
+	cancel_delayed_work_sync(&dev->timeout_work);
 
 	list_del(&dev->list);
 	cdev_device_del(&dev->cdev, &dev->dev);
@@ -1230,6 +1413,7 @@ static int vduse_create_dev(struct vduse_dev_config *config,
 		return -ENOMEM;
 
 	dev->api_version = api_version;
+	dev->dead_timeout = config->dead_timeout;
 	dev->device_id = config->device_id;
 	dev->vendor_id = config->vendor_id;
 	dev->name = kstrdup(config->name, GFP_KERNEL);
