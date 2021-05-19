@@ -342,7 +342,7 @@ static int distribute_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-DEFINE_SHOW_ATTRIBUTE(distribute);
+DEFINE_PROC_SHOW_ATTRIBUTE(distribute);
 
 static void seq_print_stack_trace(struct seq_file *m, struct irqoff_trace *trace)
 {
@@ -437,13 +437,12 @@ static int trace_latency_open(struct inode *inode, struct file *file)
 	return single_open(file, trace_latency_show, inode->i_private);
 }
 
-static const struct file_operations trace_latency_fops = {
-	.owner		= THIS_MODULE,
-	.open		= trace_latency_open,
-	.read		= seq_read,
-	.write		= trace_latency_write,
-	.llseek		= seq_lseek,
-	.release	= single_release,
+static const struct proc_ops trace_latency_ops = {
+	.proc_open	= trace_latency_open,
+	.proc_read	= seq_read,
+	.proc_write	= trace_latency_write,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
 };
 
 static int enable_show(struct seq_file *m, void *ptr)
@@ -517,12 +516,12 @@ static ssize_t enable_write(struct file *file, const char __user *buf,
 	return count;
 }
 
-static const struct file_operations enable_fops = {
-	.open		= enable_open,
-	.read		= seq_read,
-	.write		= enable_write,
-	.llseek		= seq_lseek,
-	.release	= single_release,
+static const struct proc_ops enable_ops = {
+	.proc_open	= enable_open,
+	.proc_read	= seq_read,
+	.proc_write	= enable_write,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
 };
 
 static int sampling_period_show(struct seq_file *m, void *ptr)
@@ -557,12 +556,12 @@ static ssize_t sampling_period_write(struct file *file, const char __user *buf,
 	return count;
 }
 
-static const struct file_operations sampling_period_fops = {
-	.open		= sampling_period_open,
-	.read		= seq_read,
-	.write		= sampling_period_write,
-	.llseek		= seq_lseek,
-	.release	= single_release,
+static const struct proc_ops sampling_period_ops = {
+	.proc_open	= sampling_period_open,
+	.proc_read	= seq_read,
+	.proc_write	= sampling_period_write,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
 };
 
 static int __init trace_irqoff_init(void)
@@ -575,18 +574,18 @@ static int __init trace_irqoff_init(void)
 	if (!parent_dir)
 		return -ENOMEM;
 
-	if (!proc_create("distribute", S_IRUSR, parent_dir, &distribute_fops))
+	if (!proc_create("distribute", S_IRUSR, parent_dir, &distribute_proc_ops))
 		goto remove_trace_irqoff;
 
 	if (!proc_create("trace_latency", S_IRUSR | S_IWUSR, parent_dir,
-			 &trace_latency_fops))
+			 &trace_latency_ops))
 		goto remove_distribute;
 
-	if (!proc_create("enable", S_IRUSR | S_IWUSR, parent_dir, &enable_fops))
+	if (!proc_create("enable", S_IRUSR | S_IWUSR, parent_dir, &enable_ops))
 		goto remove_trace_latency;
 
 	if (!proc_create("sampling_period", S_IRUSR | S_IWUSR, parent_dir,
-			 &sampling_period_fops))
+			 &sampling_period_ops))
 		goto remove_enable;
 
 	return 0;
