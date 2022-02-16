@@ -745,11 +745,13 @@ bpf_base_func_proto(enum bpf_func_id func_id)
 		       NULL : &bpf_probe_read_kernel_str_proto;
 	case BPF_FUNC_snprintf_btf:
 		return &bpf_snprintf_btf_proto;
+#ifdef CONFIG_BPF_UNSAFE_HELPER
 	case BPF_FUNC_unsafe_helper:
 		if (!sysctl_bpf_unsafe_helper_enable ||
 			!capable(CAP_SYS_ADMIN))
 			return NULL;
 		return &bpf_unsafe_helper_proto;
+#endif
 	default:
 		return NULL;
 	}
