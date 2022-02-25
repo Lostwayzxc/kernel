@@ -10,6 +10,7 @@
 
 #include <linux/types.h>
 #include <linux/bpf_common.h>
+#include <linux/limits.h>
 
 /* Extended instruction set based on top of classic BPF */
 
@@ -3901,13 +3902,11 @@ union bpf_attr {
 	FN(per_cpu_ptr),		\
 	FN(this_cpu_ptr),		\
 	FN(redirect_peer),		\
-	FN(unsafe_helper),
-	/*
-	 * unsafe_helper is the helper functions we implement
-	 * ourselves. In order to ensure that the order of the new helper
-	 * functions which backported from community kernel is consistent, the
-	 * unsafe_helper need to be be placed last.
-	 */
+	/* */
+
+#ifndef INT_MAX
+#define INT_MAX 0x7fffffff
+#endif
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
  * function eBPF program intends to call
@@ -3916,6 +3915,10 @@ union bpf_attr {
 enum bpf_func_id {
 	__BPF_FUNC_MAPPER(__BPF_ENUM_FN)
 	__BPF_FUNC_MAX_ID,
+
+	__BPF_BYTEDANCE_FUNC_MIN_ID = INT_MAX / 2,
+	__BPF_ENUM_FN(unsafe_helper),
+	__BPF_BYTEDANCE_FUNC_MAX_ID,
 };
 #undef __BPF_ENUM_FN
 
