@@ -170,6 +170,8 @@ typedef struct sock *(*udp_lookup_t)(const struct sk_buff *skb, __be16 sport,
 INDIRECT_CALLABLE_DECLARE(void udp_v6_early_demux(struct sk_buff *));
 INDIRECT_CALLABLE_DECLARE(int udpv6_rcv(struct sk_buff *));
 
+void udp_v6_early_demux(struct sk_buff *skb);
+
 struct sk_buff *__udp_gso_segment(struct sk_buff *gso_skb,
 				  netdev_features_t features, bool is_ipv6);
 
