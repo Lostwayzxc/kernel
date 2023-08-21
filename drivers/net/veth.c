@@ -1531,10 +1531,18 @@ static int veth_set_features(struct net_device *dev,
 {
 	netdev_features_t changed = features ^ dev->features;
 	struct veth_priv *priv = netdev_priv(dev);
+	struct net_device *peer = priv->peer;
 	int err;
 
 	if (!(changed & NETIF_F_GRO) || !(dev->flags & IFF_UP) || priv->_xdp_prog)
 		return 0;
+
+	/* peer support tx xsk. we can not enable */
+	if (peer) {
+		priv = netdev_priv(peer);
+		if (atomic_read(&priv->sq_enable_count))
+			return 0;
+	}
 
 	if (features & NETIF_F_GRO) {
 		err = veth_napi_enable(dev);
