@@ -134,6 +134,7 @@ struct veth_xsk_control_info_t {
 	u32 batch_size;
 	u32 batch_num;
 	u32 real_desc_num;
+	struct xdp_sock *xsk;
 };
 
 DEFINE_PER_CPU(struct veth_xsk_control_info_t, veth_xsk_control_info);
@@ -1166,7 +1167,7 @@ static struct sk_buff *veth_build_skb_batch_udp(struct net_device *dev,
 
 		/* udp batch: gso */
 		for (count = 0; count < hi->batch_num - 1; count++) {
-			if (!xsk_tx_peek_desc(pool, &new_desc)) {
+			if (!xsk_tx_peek_desc_sock(pool, &new_desc, &hi->xsk)) {
 				if (net_ratelimit()) {
 					pr_warn("break @ index[%d]@batch[%d], no enough tx desc!\n",
 						count, hi->batch_num);
@@ -1431,6 +1432,7 @@ static int veth_xsk_tx_xmit(struct veth_sq *sq, struct xsk_buff_pool *xsk_pool, 
 	struct veth_priv *priv, *peer_priv;
 	struct net_device *dev, *peer_dev;
 	struct veth_stats stats = {};
+	struct xdp_sock *xsk = NULL;
 	struct sk_buff *skb = NULL;
 	struct veth_rq *peer_rq;
 	bool use_napi = false;
@@ -1456,7 +1458,8 @@ static int veth_xsk_tx_xmit(struct veth_sq *sq, struct xsk_buff_pool *xsk_pool, 
 	while (budget-- > 0) {
 		unsigned int truesize = 0;
 
-		if (!xsk_tx_peek_desc(xsk_pool, &desc))
+		xsk = NULL;
+		if (!xsk_tx_peek_desc_sock(xsk_pool, &desc, &xsk))
 			break;
 
 		/* can not hold all data in a page */
@@ -1471,6 +1474,7 @@ static int veth_xsk_tx_xmit(struct veth_sq *sq, struct xsk_buff_pool *xsk_pool, 
 
 		/* check parameter in headroom */
 		veth_xsk_control_msg_prase(xsk_pool, &desc);
+		hi->xsk = xsk;
 
 		if (hi->batch_head)
 			skb = veth_build_skb_batch(peer_dev, xsk_pool, &desc);
