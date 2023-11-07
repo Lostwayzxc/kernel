@@ -1082,8 +1082,7 @@ static inline bool veth_batch_ip_check_v4(struct iphdr *iph, u32 len)
 	return true;
 }
 
-/* just support ipv4 udp batch
- * to do: ipv4 tcp and ipv6
+/* support ipv4 udp
  */
 static inline void veth_skb_batch_checksum(struct sk_buff *skb)
 {
@@ -1099,6 +1098,30 @@ static inline void veth_skb_batch_checksum(struct sk_buff *skb)
 	uh->check = 0;
 
 	udp4_hwcsum(skb, iph->saddr, iph->daddr);
+
+	skb->ip_summed = CHECKSUM_PARTIAL;
+}
+
+/*  support ipv6 udp
+ */
+static inline void veth_skb_batch_checksum_v6(struct sk_buff *skb)
+{
+	struct ipv6hdr *ip6h = ipv6_hdr(skb);
+	struct udphdr *uh = udp_hdr(skb);
+	int udp_len;
+
+	udp_len = skb->len - (skb->transport_header - skb->network_header);
+
+	/* no ipv6 extern option */
+	ip6h->payload_len = htons(udp_len);
+
+	uh->len = htons(udp_len);
+	uh->check = 0;
+
+	/* Only one fragment on the socket.  */
+	skb->csum_start = skb_transport_header(skb) - skb->head;
+	skb->csum_offset = offsetof(struct udphdr, check);
+	uh->check = ~csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, udp_len, IPPROTO_UDP, 0);
 
 	skb->ip_summed = CHECKSUM_PARTIAL;
 }
@@ -1147,13 +1170,14 @@ static inline bool veth_add_skb_tx_desc(struct sk_buff *skb, struct xsk_buff_poo
 
 static struct sk_buff *veth_build_skb_batch_udp(struct net_device *dev,
 						struct xsk_buff_pool *pool,
-						struct xdp_desc *desc)
+						struct xdp_desc *desc, bool ipv6)
 {
 	struct veth_xsk_control_info_t *hi = this_cpu_ptr(&veth_xsk_control_info);
 	u32 hr, iph_len, th_len, data_offset, tot_len;
 	struct veth_seg_info *seg_info;
 	struct sk_buff *skb = NULL;
 	struct xdp_desc new_desc;
+	struct ipv6hdr *ip6h;
 	struct udphdr *udph;
 	struct iphdr *iph;
 	int hh_len = 0;
@@ -1166,9 +1190,14 @@ static struct sk_buff *veth_build_skb_batch_udp(struct net_device *dev,
 
 	buffer = xsk_buff_raw_get_data(pool, desc->addr);
 
-	/* todo: vlan packet not support yet*/
-	iph = (struct iphdr *)(buffer + ETH_HLEN);
-	iph_len = iph->ihl * 4;
+	if (!ipv6) {
+		iph = (struct iphdr *)(buffer + ETH_HLEN);
+		iph_len = iph->ihl * 4;
+	} else {
+		/* no ipv6 extern option exist */
+		ip6h = (struct ipv6hdr *)(buffer + ETH_HLEN);
+		iph_len = sizeof(struct ipv6hdr);
+	}
 
 	udph = (struct udphdr *)(buffer + ETH_HLEN + iph_len);
 	th_len = sizeof(struct udphdr);
@@ -1253,7 +1282,10 @@ static struct sk_buff *veth_build_skb_batch_udp(struct net_device *dev,
 
 	/* CHECKSUM_PARTIAL offload
 	 */
-	veth_skb_batch_checksum(skb);
+	if (!ipv6)
+		veth_skb_batch_checksum(skb);
+	else
+		veth_skb_batch_checksum_v6(skb);
 
 	/* to do:
 	 *  add skb to sock. may be there is no need to do for this
@@ -1321,7 +1353,32 @@ static inline struct sk_buff *veth_build_skb_batch_v4(struct net_device *dev,
 
 	switch (iph->protocol) {
 	case IPPROTO_UDP:
-		return veth_build_skb_batch_udp(dev, pool, desc);
+		return veth_build_skb_batch_udp(dev, pool, desc, false);
+	default:
+		break;
+	}
+drop:
+	return NULL;
+}
+
+static inline struct sk_buff *veth_build_skb_batch_v6(struct net_device *dev,
+						      struct xsk_buff_pool *pool,
+						      struct xdp_desc *desc)
+{
+	const struct ipv6hdr *ip6h;
+	void *buffer;
+	u64 addr;
+
+	addr = desc->addr;
+	buffer = (unsigned char *)xsk_buff_raw_get_data(pool, addr);
+	ip6h = (struct ipv6hdr *)(buffer + ETH_HLEN);
+	if (ip6h->version != 6 || desc->len <= sizeof(*ip6h))
+		goto drop;
+
+	/*  just udp, no other option */
+	switch (ip6h->nexthdr) {
+	case NEXTHDR_UDP:
+		return veth_build_skb_batch_udp(dev, pool, desc, true);
 	default:
 		break;
 	}
@@ -1362,7 +1419,7 @@ static inline struct sk_buff *veth_build_skb_batch(struct net_device *dev,
 		return veth_build_skb_batch_v4(dev, pool, desc);
 	/* to do: not support yet, just build skb, no batch */
 	case ETH_P_IPV6:
-		fallthrough;
+		return veth_build_skb_batch_v6(dev, pool, desc);
 	default:
 		break;
 	}
