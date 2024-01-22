@@ -955,7 +955,7 @@ out_unlock:
 	return err;
 }
 
-static void __exit dom_data_exit(void)
+static void dom_data_exit(void)
 {
 	mutex_lock(&rdtgroup_mutex);
 
@@ -1075,7 +1075,7 @@ int __init rdt_get_mon_l3_config(struct rdt_resource *r)
 	return 0;
 }
 
-void __exit resctrl_mon_resource_exit(void)
+void resctrl_mon_resource_exit(void)
 {
 	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
 
