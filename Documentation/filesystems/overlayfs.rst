@@ -591,6 +591,15 @@ fresh one. In very limited cases where the user knows that the system has
 not crashed and contents of upperdir are intact, The "volatile" directory
 can be removed.
 
+
+User xattr
+----------
+
+The the "-o userxattr" mount option forces overlayfs to use the
+"user.overlay." xattr namespace instead of "trusted.overlay.".  This is
+useful for unprivileged mounting of overlayfs.
+
+
 Testsuite
 ---------
 
