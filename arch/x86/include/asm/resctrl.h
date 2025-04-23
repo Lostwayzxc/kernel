@@ -94,6 +94,8 @@ static inline bool resctrl_arch_is_mbm_total_enabled(void)
 	return (rdt_mon_features & (1 << QOS_L3_MBM_TOTAL_EVENT_ID));
 }
 
+static inline bool resctrl_arch_would_mbm_overflow(void) { return true; }
+
 static inline bool resctrl_arch_is_mbm_local_enabled(void)
 {
 	return (rdt_mon_features & (1 << QOS_L3_MBM_LOCAL_EVENT_ID));
