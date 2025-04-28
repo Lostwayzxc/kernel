@@ -133,6 +133,8 @@ struct rdt_domain {
  * @arch_has_sparse_bitmasks:	True if a bitmask like f00f is valid.
  * @arch_has_per_cpu_cfg:	True if QOS_CFG register for this cache
  *				level has CPU scope.
+ * @intpri_wd:		Number of implemented bits in the priority
+ *			partition.
  */
 struct resctrl_cache {
 	unsigned int	cbm_len;
@@ -140,6 +142,7 @@ struct resctrl_cache {
 	unsigned int	shareable_bits;
 	bool		arch_has_sparse_bitmasks;
 	bool		arch_has_per_cpu_cfg;
+	unsigned int	intpri_wd;
 };
 
 /**
@@ -166,6 +169,8 @@ enum membw_throttle_mode {
  *			different memory bandwidths
  * @mba_sc:		True if MBA software controller(mba_sc) is enabled
  * @mb_map:		Mapping of memory B/W percentage to memory B/W delay
+ * @intpri_wd:		Number of implemented bits in the priority
+ *			partition.
  */
 struct resctrl_membw {
 	u32				min_bw;
@@ -175,6 +180,7 @@ struct resctrl_membw {
 	enum membw_throttle_mode	throttle_mode;
 	bool				mba_sc;
 	u32				*mb_map;
+	u32                             intpri_wd;
 };
 
 /**
