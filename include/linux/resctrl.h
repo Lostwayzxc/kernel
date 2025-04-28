@@ -178,6 +178,16 @@ struct resctrl_membw {
 };
 
 /**
+ * enum resctrl_schema_fmt - The format user-space provides for a schema.
+ * @RESCTRL_SCHEMA_BITMAP:	The schema is a bitmap in hex.
+ * @RESCTRL_SCHEMA_RANGE:	The schema is a decimal number.
+ */
+enum resctrl_schema_fmt {
+	RESCTRL_SCHEMA_BITMAP,
+	RESCTRL_SCHEMA_RANGE,
+};
+
+/**
  * struct rdt_resource - attributes of a resctrl resource
  * @rid:		The index of the resource
  * @alloc_capable:	Is allocation available on this machine
@@ -214,6 +224,7 @@ struct rdt_resource {
 	unsigned int		mbm_cfg_mask;
 	unsigned long		fflags;
 	bool			cdp_capable;
+	enum resctrl_schema_fmt schema_fmt;
 };
 
 /*
@@ -237,7 +248,7 @@ struct rdt_resource *resctrl_arch_get_resource(enum resctrl_res_level l);
  */
 struct resctrl_schema {
 	struct list_head		list;
-	char				name[8];
+	char				name[16];
 	enum resctrl_conf_type		conf_type;
 	struct rdt_resource		*res;
 	u32				num_closid;
