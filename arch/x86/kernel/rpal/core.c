@@ -81,6 +81,113 @@ static long rpal_cmd_register_thread(unsigned long arg0, unsigned long arg1)
 	return ret;
 }
 
+
+static void *rpal_uds_peer_data(struct sock *psk, int *pfd)
+{
+	void *ep = NULL;
+	unsigned long flags;
+	struct socket_wq *wq;
+	wait_queue_entry_t *entry;
+	wait_queue_head_t *whead;
+
+	rcu_read_lock();
+	wq = rcu_dereference(psk->sk_wq);
+	if (!skwq_has_sleeper(wq))
+		goto unlock_rcu;
+
+	whead = &wq->wait;
+
+	spin_lock_irqsave(&whead->lock, flags);
+	if (list_empty(&whead->head)) {
+		pr_debug("rpal debug: [%d] cannot find epitem entry\n",
+			 current->pid);
+		goto unlock_spin;
+	}
+	entry = list_first_entry(&whead->head, wait_queue_entry_t, entry);
+	*pfd = rpal_get_epitemfd(entry);
+	if (*pfd < 0) {
+		pr_debug("rpal debug: [%d] cannot find epitem fd\n",
+			 current->pid);
+		goto unlock_spin;
+	}
+	ep = rpal_get_epitemep(entry);
+
+unlock_spin:
+	spin_unlock_irqrestore(&whead->lock, flags);
+unlock_rcu:
+	rcu_read_unlock();
+	return ep;
+}
+
+static int rpal_find_receiver_rid(int id, void *ep)
+{
+	struct task_struct *tsk;
+	struct rpal_service *cur, *tgt;
+	int rid = -1;
+
+	cur = rpal_current_service();
+
+	tgt = rpal_get_mapped_service_by_id(cur, id);
+	if (tgt == NULL)
+		goto out;
+
+	for_each_thread(tgt->leader_thread, tsk) {
+		if (!rpal_test_task_thread_flag(tsk, RPAL_IS_RECEIVER_BIT))
+			continue;
+		if (tsk->rpal_rd->ep == ep) {
+			rid = tsk->rpal_rd->rec->rid;
+			break;
+		}
+	}
+
+	rpal_put_service(tgt);
+out:
+	return rid;
+}
+
+static long rpal_uds_fdmap(int service_id, int cfd)
+{
+	void *ep;
+	int sfd = -1;
+	int rid = -1;
+	long ret = -1;
+	struct fd f;
+	struct socket *sock;
+	struct sock *peer_sk;
+
+	f = fdget(cfd);
+	if (!f.file)
+		goto fd_put;
+
+	sock = sock_from_file(f.file);
+	if (!sock)
+		goto fd_put;
+
+	peer_sk = unix_peer_get(sock->sk);
+	if (peer_sk == NULL)
+		goto fd_put;
+	ep = rpal_uds_peer_data(peer_sk, &sfd);
+	if (ep == NULL) {
+		pr_debug("rpal debug: [%d] cannot find epitem ep\n",
+			 current->pid);
+		goto peer_sock_put;
+	}
+	rid = rpal_find_receiver_rid(service_id, ep);
+	if (rid < 0) {
+		pr_debug("rpal debug: [%d] rpal: cannot find epitem rid\n",
+			 current->pid);
+		goto peer_sock_put;
+	}
+	ret = (long)rid << 32 | (long)sfd;
+
+peer_sock_put:
+	sock_put(peer_sk);
+fd_put:
+	if (f.file)
+		fdput(f);
+	return ret;
+}
+
 long rpal_ctl(unsigned long cmd, unsigned long arg0, unsigned long arg1)
 {
 	struct rpal_service *cur = rpal_current_service();
@@ -108,6 +215,12 @@ long rpal_ctl(unsigned long cmd, unsigned long arg0, unsigned long arg1)
 		break;
 	case RPAL_CMD_REGISTER_THREAD:
 		ret = rpal_cmd_register_thread(arg0, arg1);
+		break;
+	case RPAL_CMD_UDS_FDMAP:
+		ret = rpal_uds_fdmap((int)(arg0), (int)arg1);
+		break;
+	case RPAL_CMD_GET_SERVICE_ID:
+		ret = (long)cur->id;
 		break;
 	default:
 		ret = -RPAL_ERR_BAD_ARG;

@@ -45,6 +45,19 @@ static inline void fdput(struct fd fd)
 		fput(fd.file);
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+/*
+ * RPAL may need to do fdput in atomic context.
+ * So add this API.
+ */
+extern void rpal_fput(struct file *file);
+static inline void rpal_fdput(struct fd fd)
+{
+	if (fd.flags & FDPUT_FPUT)
+		rpal_fput(fd.file);
+}
+#endif
+
 extern struct file *fget(unsigned int fd);
 extern struct file *fget_raw(unsigned int fd);
 extern struct file *fget_task(struct task_struct *task, unsigned int fd);

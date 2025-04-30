@@ -4240,6 +4240,25 @@ bool try_invoke_on_locked_down_task(struct task_struct *p, bool (*func)(struct t
 	return ret;
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+int rpal_ep_autoremove_wake_function(wait_queue_entry_t *curr,
+				     unsigned int mode, int wake_flags,
+				     void *key)
+{
+	struct rpal_receiver_data *rrd = curr->private;
+	struct task_struct *tsk = rrd->rcd->bp_task;
+	int ret;
+
+	ret = try_to_wake_up(tsk, mode, wake_flags);
+
+	list_del_init_careful(&curr->entry);
+	if (!ret)
+		atomic_or(RPAL_KERNEL_PENDING, &rrd->rec->ep_pending);
+
+	return 1;
+}
+#endif
+
 /**
  * wake_up_process - Wake up a specific process
  * @p: The process to be woken up.

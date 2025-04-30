@@ -24,6 +24,8 @@ enum rpal_command_type {
 	RPAL_CMD_ENABLE_SERVICE,
 	RPAL_CMD_DISABLE_SERVICE,
 	RPAL_CMD_REGISTER_THREAD,
+	RPAL_CMD_UDS_FDMAP,
+	RPAL_CMD_GET_SERVICE_ID,
 	RPAL_NR_CMD,
 };
 
@@ -37,12 +39,6 @@ enum {
 	RPAL_REGISTER_RECEIVER_THREAD,
 	RPAL_UNREGISTER_SENDER_THREAD,
 	RPAL_UNREGISTER_RECEIVER_THREAD,
-};
-
-enum rpal_task_flag_bits {
-	RPAL_IS_SENDER_BIT,
-	RPAL_IS_RECEIVER_BIT,
-	RPAL_WAKE_BIT,
 };
 
 enum rpal_task_status {
@@ -100,6 +96,8 @@ void rpal_remove_wake_list(struct rpal_service *rs,
 void rpal_insert_wake_list(struct rpal_service *rs,
 			   struct rpal_receiver_data *rrd);
 struct task_struct *rpal_find_next_task(unsigned long fsbase);
+struct rpal_service *rpal_get_mapped_service_by_id(struct rpal_service *rs,
+	int id);
 struct rpal_service *rpal_get_mapped_service_by_addr(struct rpal_service *rs,
 	unsigned long addr);
 

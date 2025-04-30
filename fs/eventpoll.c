@@ -38,6 +38,7 @@
 #include <linux/compat.h>
 #include <linux/rculist.h>
 #include <net/busy_poll.h>
+#include <linux/rpal.h>
 
 /*
  * LOCKING:
@@ -2213,6 +2214,281 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 	return do_epoll_ctl(epfd, op, fd, &epds, false);
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+int rpal_ep_send_events(void *ep, struct rpal_receiver_epoll_context *rec)
+{
+	int eavail = ep_events_available(ep);
+	int ret = 0;
+
+	if (eavail)
+		ret = ep_send_events(ep, rec->events, rec->maxevents);
+
+	eavail = ep_events_available(ep);
+	if (!eavail) {
+		atomic_and(~RPAL_KERNEL_PENDING, &rec->ep_pending);
+		/* check again to avoid data race on RPAL_KERNEL_PENDING */
+		eavail = ep_events_available(ep);
+		if (eavail)
+			atomic_or(RPAL_KERNEL_PENDING, &rec->ep_pending);
+	}
+	return ret;
+}
+
+static void *rpal_get_eventpoll(struct rpal_receiver_data *rrd, struct pt_regs *regs)
+{
+	struct rpal_receiver_epoll_context *rec = rrd->rec;
+	int epfd = rec->epfd;
+	struct epoll_event __user *events = rec->events;
+	int maxevents = rec->maxevents;
+
+	if (maxevents <= 0 || maxevents > EP_MAX_EVENTS) {
+		regs->ax = -EINVAL;
+		return NULL;
+	}
+
+	if (!access_ok(events, maxevents * sizeof(struct epoll_event))) {
+		regs->ax = -EFAULT;
+		return NULL;
+	}
+
+	rrd->f = fdget(epfd);
+	if (!rrd->f.file) {
+		regs->ax = -EBADF;
+		return NULL;
+	}
+
+	if (!is_file_epoll(rrd->f.file)) {
+		regs->ax = -EINVAL;
+		rpal_fdput(rrd->f);
+		return NULL;
+	}
+
+	rrd->ep = rrd->f.file->private_data;
+	return rrd->ep;
+}
+
+void rpal_ep_poll_nosched(struct rpal_receiver_data *rrd, struct pt_regs *regs)
+{
+	struct eventpoll *ep;
+	struct rpal_receiver_epoll_context *rec = rrd->rec;
+	ktime_t ts = 0;
+	struct hrtimer *ht = &rrd->ep_sleeper.timer;
+	int status;
+	int avail;
+
+	ep = rpal_get_eventpoll(rrd, regs);
+
+	rpal_set_current_thread_flag(RPAL_RECEIVER_KERNEL_RET_BIT);
+
+	if (!ep || signal_pending(current) ||
+	    unlikely(ep_events_available(ep)) ||
+	    atomic_read(&rec->ep_pending) || unlikely(rec->timeout == 0)) {
+		// ep_status should be EP_KAPP->EP_KSYS(in rpal_kernel_ret)
+		INIT_LIST_HEAD(&rrd->ep_wait.entry);
+	} else {
+		status = atomic_xchg(&rec->ep_status, RPAL_EP_READY_WAIT_LS);
+		if (unlikely(status != RPAL_EP_KAPP))
+			rpal_err("%s: unexpected ep_status: %d\n", __func__, status);
+		init_waitqueue_func_entry(&rrd->ep_wait, rpal_ep_autoremove_wake_function);
+		rrd->ep_wait.private = rrd;
+		INIT_LIST_HEAD(&rrd->ep_wait.entry);
+		write_lock(&ep->lock);
+		set_current_state(TASK_INTERRUPTIBLE);
+		avail = ep_events_available(ep);
+		if (!avail)
+			__add_wait_queue_exclusive(&ep->wq, &rrd->ep_wait);
+		write_unlock(&ep->lock);
+		if (avail) {
+			// ep_status should be EP_KAPP->EP_KSYS(in rpal_kernel_ret)
+			atomic_set(&rec->ep_status, RPAL_EP_KAPP);
+			set_current_state(TASK_RUNNING);
+			return;
+		}
+
+		if (rec->timeout > 0) {
+			rrd->ep_sleeper.task = rrd->rcd->bp_task;
+			ts = ms_to_ktime(rec->timeout);
+			hrtimer_start(ht, ts, HRTIMER_MODE_REL);
+		}
+	}
+}
+
+void *rpal_get_epitemep(wait_queue_entry_t *wait)
+{
+	struct epitem *epi = ep_item_from_wait(wait);
+
+	if (!epi)
+		return NULL;
+
+	return epi->ep;
+}
+
+int rpal_get_epitemfd(wait_queue_entry_t *wait)
+{
+	struct epitem *epi = ep_item_from_wait(wait);
+
+	if (!epi)
+		return -1;
+
+	return epi->ffd.fd;
+}
+
+void rpal_resume_ep(struct task_struct *tsk)
+{
+	struct rpal_receiver_data *rrd = tsk->rpal_rd;
+	struct eventpoll *ep = (struct eventpoll *)rrd->ep;
+	struct rpal_receiver_epoll_context *rec = rrd->rec;
+
+	rpal_clear_task_thread_flag(tsk, RPAL_RECEIVER_KERNEL_RET_BIT);
+
+	if (rec->timeout > 0) {
+		hrtimer_cancel(&rrd->ep_sleeper.timer);
+		destroy_hrtimer_on_stack(&rrd->ep_sleeper.timer);
+	}
+	if (!list_empty_careful(&rrd->ep_wait.entry)) {
+		write_lock(&ep->lock);
+		__remove_wait_queue(&ep->wq, &rrd->ep_wait);
+		write_unlock(&ep->lock);
+	}
+}
+
+static int rpal_schedule_hrtimeout_range_clock(ktime_t *expires, u64 delta,
+					       const enum hrtimer_mode mode,
+					       clockid_t clock_id)
+{
+	struct hrtimer_sleeper *t = &current->rpal_rd->ep_sleeper;
+
+	/*
+	 * Optimize when a zero timeout value is given. It does not
+	 * matter whether this is an absolute or a relative time.
+	 */
+	if (expires && *expires == 0) {
+		__set_current_state(TASK_RUNNING);
+		return 0;
+	}
+
+	/*
+	 * A NULL parameter means "infinite"
+	 */
+	if (!expires) {
+		schedule();
+		return -EINTR;
+	}
+
+	hrtimer_init_sleeper_on_stack(t, clock_id, mode);
+	hrtimer_set_expires_range_ns(&t->timer, *expires, delta);
+	hrtimer_sleeper_start_expires(t, mode);
+
+	if (likely(t->task))
+		schedule();
+
+	hrtimer_cancel(&t->timer);
+	destroy_hrtimer_on_stack(&t->timer);
+
+	__set_current_state(TASK_RUNNING);
+
+	return !t->task ? 0 : -EINTR;
+}
+
+static int rpal_ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+			int maxevents, struct timespec64 *timeout)
+{
+	int res = 0, eavail, timed_out = 0;
+	u64 slack = 0;
+	struct rpal_receiver_data *rrd = current->rpal_rd;
+	wait_queue_entry_t *wait = &rrd->ep_wait;
+	ktime_t expires, *to = NULL;
+
+	rrd->ep = ep;
+
+	lockdep_assert_irqs_enabled();
+
+	if (timeout && (timeout->tv_sec | timeout->tv_nsec)) {
+		slack = select_estimate_accuracy(timeout);
+		to = &expires;
+		*to = timespec64_to_ktime(*timeout);
+	} else if (timeout) {
+		timed_out = 1;
+	}
+
+	eavail = ep_events_available(ep);
+
+	while (1) {
+		if (eavail) {
+			res = rpal_ep_send_events(ep, rrd->rec);
+			if (res) {
+				atomic_xchg(&rrd->rec->ep_status, RPAL_EP_SYS);
+				return res;
+			}
+		}
+
+		if (timed_out) {
+			atomic_xchg(&rrd->rec->ep_status, RPAL_EP_SYS);
+			return 0;
+		}
+
+		eavail = ep_busy_loop(ep, timed_out);
+		if (eavail)
+			continue;
+
+		if (signal_pending(current)) {
+			atomic_xchg(&rrd->rec->ep_status, RPAL_EP_SYS);
+			return -EINTR;
+		}
+
+		init_wait(wait);
+		wait->func = rpal_ep_autoremove_wake_function;
+		wait->private = rrd;
+		write_lock_irq(&ep->lock);
+
+		atomic_xchg(&rrd->rec->ep_status, RPAL_EP_READY_WAIT);
+		__set_current_state(TASK_INTERRUPTIBLE);
+
+		eavail = ep_events_available(ep);
+		if (!eavail)
+			__add_wait_queue_exclusive(&ep->wq, wait);
+
+		write_unlock_irq(&ep->lock);
+
+		if (!eavail) {
+			if (RPAL_USER_PENDING & atomic_read(&rrd->rec->ep_pending)) {
+				timed_out = 1;
+			} else {
+				rpal_set_task_thread_flag(current, RPAL_SYSCALL_ENTER_BIT);
+				timed_out = !rpal_schedule_hrtimeout_range_clock(
+					to, slack, HRTIMER_MODE_ABS, CLOCK_MONOTONIC);
+				rpal_clear_task_thread_flag(current, RPAL_SYSCALL_ENTER_BIT);
+			}
+		}
+		atomic_cmpxchg(&rrd->rec->ep_status, RPAL_EP_READY_WAIT,
+			       RPAL_EP_SYS);
+		__set_current_state(TASK_RUNNING);
+
+		/*
+		 * We were woken up, thus go and try to harvest some events.
+		 * If timed out and still on the wait queue, recheck eavail
+		 * carefully under lock, below.
+		 */
+		eavail = 1;
+
+		if (!list_empty_careful(&wait->entry)) {
+			write_lock_irq(&ep->lock);
+			/*
+			 * If the thread timed out and is not on the wait queue,
+			 * it means that the thread was woken up after its
+			 * timeout expired before it could reacquire the lock.
+			 * Thus, when wait.entry is empty, it needs to harvest
+			 * events.
+			 */
+			if (timed_out)
+				eavail = list_empty(&wait->entry);
+			__remove_wait_queue(&ep->wq, wait);
+			write_unlock_irq(&ep->lock);
+		}
+	}
+}
+#endif
+
 /*
  * Implement the event wait interface for the eventpoll file. It is the kernel
  * part of the user space epoll_wait(2).
@@ -2252,7 +2528,25 @@ static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 	ep = f.file->private_data;
 
 	/* Time to fish for events ... */
+#if IS_ENABLED(CONFIG_RPAL)
+	/*
+	 * For RPAL task, if it is a receiver and it set MAGIC in shared memory,
+	 * We think it is prepared for rpal calls. Therefore, we need to handle
+	 * it differently.
+	 *
+	 * In other cases, RPAL task always plays like a normal task.
+	 */
+	if (rpal_current_service() &&
+	    rpal_test_current_thread_flag(RPAL_IS_RECEIVER_BIT) &&
+	    current->rpal_rd->rec->rpal_ep_poll == RPAL_EP_POLL_MAGIC) {
+		current->rpal_rd->f = f;
+		error = rpal_ep_poll(ep, events, maxevents, to);
+	} else {
+		error = ep_poll(ep, events, maxevents, to);
+	}
+#else
 	error = ep_poll(ep, events, maxevents, to);
+#endif
 
 error_fput:
 	fdput(f);

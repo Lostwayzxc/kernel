@@ -82,6 +82,14 @@ enum rpal_epoll_status {
 	RPAL_EP_READY_WAIT_LS,
 };
 
+enum rpal_task_flag_bits {
+	RPAL_IS_SENDER_BIT,
+	RPAL_IS_RECEIVER_BIT,
+	RPAL_WAKE_BIT,
+	RPAL_SYSCALL_ENTER_BIT,
+	RPAL_RECEIVER_KERNEL_RET_BIT,
+};
+
 /*
  * Following structures should have the same memory layout with user.
  * It seems nothing being different between kernel and user structure
@@ -391,5 +399,10 @@ bool rpal_is_correct_address(struct rpal_service *rs, unsigned long address);
 int rpal_init_thread_pending(struct rpal_common_data *rcd);
 void rpal_free_thread_pending(struct rpal_common_data *rcd);
 
+int rpal_get_epitemfd(wait_queue_entry_t *wait);
+void *rpal_get_epitemep(wait_queue_entry_t *wait);
 void rpal_pick_mmap_base(struct mm_struct *mm, struct rlimit *rlim_stack);
+int rpal_ep_autoremove_wake_function(wait_queue_entry_t *curr,
+	unsigned int mode, int wake_flags,
+	void *key);
 #endif /* _LINUX_RPAL_H_ */

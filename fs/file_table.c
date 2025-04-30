@@ -347,6 +347,16 @@ void fput(struct file *file)
 	}
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+void rpal_fput(struct file *file)
+{
+	if (atomic_long_sub_and_test(1, &file->f_count)) {
+		if (llist_add(&file->f_u.fu_llist, &delayed_fput_list))
+			schedule_delayed_work(&delayed_fput_work, 1);
+	}
+}
+#endif
+
 /*
  * synchronous analog of fput(); for kernel threads that might be needed
  * in some umount() (and thus can't use flush_delayed_fput() without
