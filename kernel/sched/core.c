@@ -616,6 +616,20 @@ struct rq *task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 	}
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+s64 rpal_fix_sched_runtime(s64 delta)
+{
+	if (unlikely(current->fix_runtime != 0)) {
+		current->total_runtime += current->fix_runtime;
+		delta += current->fix_runtime;
+		if (unlikely(delta < 0))
+			delta = 0;
+		current->fix_runtime = 0;
+	}
+	return delta;
+}
+#endif
+
 /*
  * RQ-clock updating methods:
  */
@@ -666,6 +680,9 @@ static void update_rq_clock_task(struct rq *rq, s64 delta)
 	}
 #endif
 
+#if IS_ENABLED(CONFIG_RPAL)
+	delta = rpal_fix_sched_runtime(delta);
+#endif
 	rq->clock_task += delta;
 
 #ifdef CONFIG_HAVE_SCHED_AVG_IRQ
@@ -2901,6 +2918,77 @@ void rpal_free_thread_pending(struct rpal_common_data *rcd)
 	if (rcd->pending != NULL)
 		kfree(rcd->pending);
 }
+
+int rpal_set_cpus_allowed_ptr(struct task_struct *p, bool is_lock,
+			      bool is_kernel_ret)
+{
+	const struct cpumask *cpu_valid_mask = cpu_active_mask;
+	struct set_affinity_pending *pending = p->rpal_cd->pending;
+	struct cpumask new_mask;
+	unsigned int dest_cpu;
+	struct rq_flags rf;
+	struct rq *rq;
+	int ret = 0;
+
+	if (unlikely(p->flags & PF_KTHREAD))
+		rpal_err("p: %d, p->flags & PF_KTHREAD\n", p->pid);
+
+	rq = task_rq_lock(p, &rf);
+
+	if (is_lock) {
+		cpumask_copy(&p->rpal_cd->old_mask, &p->cpus_mask);
+		cpumask_clear(&new_mask);
+		cpumask_set_cpu(smp_processor_id(), &new_mask);
+		rpal_set_task_thread_flag(p, RPAL_CPU_LOCKED_BIT);
+	} else {
+		cpumask_copy(&new_mask, &p->rpal_cd->old_mask);
+		rpal_clear_task_thread_flag(p, RPAL_CPU_LOCKED_BIT);
+	}
+
+	if (is_kernel_ret)
+		return __set_cpus_allowed_ptr_locked(p, &new_mask, 0, rq, &rf);
+
+	update_rq_clock(rq);
+
+	if (cpumask_equal(&p->cpus_mask, &new_mask))
+		goto out;
+	/*
+	 * Picking a ~random cpu helps in cases where we are changing affinity
+	 * for groups of tasks (ie. cpuset), so that load balancing is not
+	 * immediately required to distribute the tasks within their new mask.
+	 */
+	dest_cpu = cpumask_any_and_distribute(cpu_valid_mask, &new_mask);
+	if (dest_cpu >= nr_cpu_ids) {
+		ret = -EINVAL;
+		goto out;
+	}
+	__do_set_cpus_allowed(p, &new_mask, 0);
+	if (cpumask_test_cpu(task_cpu(p), &p->cpus_mask)) {
+		preempt_disable();
+		task_rq_unlock(rq, p, &rf);
+		preempt_enable();
+	} else {
+		pending->arg.dest_cpu = dest_cpu;
+
+		if (task_running(rq, p) ||
+		    READ_ONCE(p->__state) == TASK_WAKING) {
+			preempt_disable();
+			task_rq_unlock(rq, p, &rf);
+			stop_one_cpu_nowait(cpu_of(rq), migration_cpu_stop,
+					    &pending->arg, &pending->stop_work);
+		} else {
+			if (task_on_rq_queued(p))
+				rq = move_queued_task(rq, &rf, p, dest_cpu);
+			task_rq_unlock(rq, p, &rf);
+		}
+	}
+
+	return 0;
+
+out:
+	task_rq_unlock(rq, p, &rf);
+	return ret;
+}
 #endif
 
 /*
@@ -2918,7 +3006,18 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 	struct rq_flags rf;
 	struct rq *rq;
 
+#if IS_ENABLED(CONFIG_RPAL)
+retry:
 	rq = task_rq_lock(p, &rf);
+	if (rpal_test_task_thread_flag(p, RPAL_CPU_LOCKED_BIT)) {
+		update_rq_clock(rq);
+		task_rq_unlock(rq, p, &rf);
+		schedule();
+		goto retry;
+	}
+#else
+	rq = task_rq_lock(p, &rf);
+#endif
 	return __set_cpus_allowed_ptr_locked(p, new_mask, flags, rq, &rf);
 }
 
@@ -3695,6 +3794,52 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 	return ret;
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+static bool rpal_check_ep_status(struct task_struct *p)
+{
+	bool ret = true;
+
+	if (rpal_test_task_thread_flag(p, RPAL_IS_RECEIVER_BIT)) {
+		struct rpal_receiver_epoll_context *rec = p->rpal_rd->rec;
+		int status;
+
+		rpal_clear_task_thread_flag(p, RPAL_WAKE_BIT);
+retry:
+		status = atomic_read(&rec->ep_status) & RPAL_EP_STATUS_MASK;
+		switch (status) {
+		case RPAL_EP_READY_WAIT:
+		case RPAL_EP_WAIT:
+			if (status != atomic_cmpxchg(&rec->ep_status, status,
+						     RPAL_EP_SYS))
+				goto retry;
+			break;
+		case RPAL_EP_KAPP:
+		case RPAL_EP_SYS:
+		case RPAL_EP_KSYS:
+			break;
+		/*
+		 * Allow RPAL_EP_READY_WAIT_LS to be woken will cause irq
+		 * being enabled in rpal_unlock_cpu.
+		 */
+		case RPAL_EP_READY_WAIT_LS:
+		case RPAL_EP_APP:
+			/*
+			 * If it is not able to be woken up, we just set a flag
+			 * here and it will be woken up by worker thread later.
+			 */
+			rpal_set_task_thread_flag(p, RPAL_WAKE_BIT);
+			ret = false;
+			break;
+		default:
+			rpal_err("%s: invalid EP state: %d\n", __func__,
+				 status);
+			break;
+		}
+	}
+	return ret;
+}
+#endif
+
 #ifdef CONFIG_SMP
 void sched_ttwu_pending(void *arg)
 {
@@ -3715,6 +3860,11 @@ void sched_ttwu_pending(void *arg)
 
 		if (WARN_ON_ONCE(task_cpu(p) != cpu_of(rq)))
 			set_task_cpu(p, cpu_of(rq));
+
+#if IS_ENABLED(CONFIG_RPAL)
+		if (!rpal_check_ep_status(p))
+			continue;
+#endif
 
 		ttwu_do_activate(rq, p, p->sched_remote_wakeup ? WF_MIGRATED : 0, &rf);
 	}
@@ -4056,6 +4206,17 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 		if (!ttwu_state_match(p, state, &success))
 			goto out;
 
+#if IS_ENABLED(CONFIG_RPAL)
+		/*
+		 * For rpal thread, we need to check if it can be woken up. If not,
+		 * we do not wake it up here but wake it up later by kernel worker.
+		 *
+		 * For normal thread, nothing happens.
+		 */
+		if (!rpal_check_ep_status(p))
+			goto out;
+#endif
+
 		trace_sched_waking(p);
 		WRITE_ONCE(p->__state, TASK_RUNNING);
 		trace_sched_wakeup(p);
@@ -4072,6 +4233,12 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	smp_mb__after_spinlock();
 	if (!ttwu_state_match(p, state, &success))
 		goto unlock;
+
+#if IS_ENABLED(CONFIG_RPAL)
+	/* We do the same thing as we do when p == current */
+	if (!rpal_check_ep_status(p))
+		goto unlock;
+#endif
 
 	trace_sched_waking(p);
 
@@ -4100,6 +4267,12 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	smp_rmb();
 	if (READ_ONCE(p->on_rq) && ttwu_runnable(p, wake_flags))
 		goto unlock;
+
+#if IS_ENABLED(CONFIG_RPAL)
+	/* We must check again in case that the status is RPAL_EP_WAIT. */
+	if (!rpal_check_ep_status(p))
+		goto unlock;
+#endif
 
 #ifdef CONFIG_SMP
 	/*
@@ -4195,6 +4368,56 @@ out:
 	return success;
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+int rpal_try_to_wake_up(struct task_struct *p)
+{
+	unsigned long flags;
+	int cpu, success = 0;
+	int wake_flags = 0;
+
+	rpal_clear_task_thread_flag(p, RPAL_WAKE_BIT);
+	preempt_disable();
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
+	smp_mb__after_spinlock();
+
+	trace_sched_waking(p);
+
+	if (p->on_rq)
+		panic("rpal error: p[%d] is on rq\n", p->pid);
+
+	/* We're going to change ->state: */
+	success = 1;
+
+#ifdef CONFIG_SMP
+	smp_acquire__after_ctrl_dep();
+	WRITE_ONCE(p->__state, TASK_WAKING);
+
+	smp_cond_load_acquire(&p->on_cpu, !VAL);
+
+	cpu = select_task_rq(p, p->wake_cpu, wake_flags | WF_TTWU);
+	if (task_cpu(p) != cpu) {
+		if (p->in_iowait) {
+			delayacct_blkio_end(p);
+			atomic_dec(&task_rq(p)->nr_iowait);
+		}
+
+		wake_flags |= WF_MIGRATED;
+		psi_ttwu_dequeue(p);
+		set_task_cpu(p, cpu);
+	}
+
+#else /* CONFIG_SMP */
+	cpu = task_cpu(p);
+#endif /* CONFIG_SMP */
+
+	ttwu_queue(p, cpu, wake_flags);
+	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+	ttwu_stat(p, cpu, wake_flags);
+	preempt_enable_no_resched();
+	return success;
+}
+#endif
+
 /**
  * try_invoke_on_locked_down_task - Invoke a function on task in fixed state
  * @p: Process for which the function is to be invoked, can be @current.
@@ -4256,6 +4479,15 @@ int rpal_ep_autoremove_wake_function(wait_queue_entry_t *curr,
 		atomic_or(RPAL_KERNEL_PENDING, &rrd->rec->ep_pending);
 
 	return 1;
+}
+
+static inline void rpal_check_ep_ready_wait(struct task_struct *tsk, int status)
+{
+	if (rpal_test_task_thread_flag(tsk, RPAL_IS_RECEIVER_BIT)) {
+		struct rpal_receiver_epoll_context *rec = tsk->rpal_rd->rec;
+
+		atomic_cmpxchg(&rec->ep_status, status, RPAL_EP_SYS);
+	}
 }
 #endif
 
@@ -6240,6 +6472,34 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 # define SM_MASK_PREEMPT	SM_PREEMPT
 #endif
 
+#if IS_ENABLED(CONFIG_RPAL)
+void rpal_acct_runtime(void)
+{
+	if (rpal_current_service()) {
+		if (rpal_test_task_thread_flag(current, RPAL_IS_SENDER_BIT)) {
+			if (current->rpal_sd->sec->total_time != 0) {
+				u64 slice = native_sched_clock_from_tsc(
+						    current->rpal_sd->sec
+							    ->total_time) -
+					    native_sched_clock_from_tsc(0);
+				current->fix_runtime -= slice;
+				current->rpal_sd->sec->total_time = 0;
+			}
+		} else if (rpal_test_task_thread_flag(current,
+						      RPAL_IS_RECEIVER_BIT)) {
+			if (current->rpal_rd->rec->total_time != 0) {
+				u64 slice = native_sched_clock_from_tsc(
+						    current->rpal_rd->rec
+							    ->total_time) -
+					    native_sched_clock_from_tsc(0);
+				current->fix_runtime += slice;
+				current->rpal_rd->rec->total_time = 0;
+			}
+		}
+	}
+}
+#endif
+
 /*
  * __schedule() is the main scheduler function.
  *
@@ -6288,6 +6548,10 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 	struct rq *rq;
 	int cpu;
 
+#if IS_ENABLED(CONFIG_RPAL)
+	rpal_acct_runtime();
+#endif
+
 	cpu = smp_processor_id();
 	rq = cpu_rq(cpu);
 	prev = rq->curr;
@@ -6334,6 +6598,15 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 	prev_state = READ_ONCE(prev->__state);
 	if (!(sched_mode & SM_MASK_PREEMPT) && prev_state) {
 		if (signal_pending_state(prev_state, prev)) {
+#if IS_ENABLED(CONFIG_RPAL)
+			/*
+			 * As the task is going to be at TASK_RUNNING state, we should
+			 * clean up RPAL_EP_READY_WAIT status. Therefore, the ep_status
+			 * will not be change to RPAL_EP_READY_WAIT. Thus, no rpal calls
+			 * can be happened when a receiver is at TASK_RUNNING state.
+			 */
+			rpal_check_ep_ready_wait(prev, RPAL_EP_READY_WAIT);
+#endif
 			WRITE_ONCE(prev->__state, TASK_RUNNING);
 		} else {
 			prev->sched_contributes_to_load =
@@ -11046,3 +11319,431 @@ void call_trace_sched_update_nr_running(struct rq *rq, int count)
 {
         trace_sched_update_nr_running_tp(rq, count);
 }
+
+#if IS_ENABLED(CONFIG_RPAL)
+asmlinkage __visible void rpal_schedule_tail(struct task_struct *prev)
+	__releases(rq->lock)
+{
+	/*
+	 * New tasks start with FORK_PREEMPT_COUNT, see there and
+	 * finish_task_switch() for details.
+	 *
+	 * finish_task_switch() will drop rq->lock() and lower preempt_count
+	 * and the preempt_enable() will end up enabling preemption (on
+	 * PREEMPT_COUNT kernels).
+	 */
+
+	finish_task_switch(prev);
+	preempt_enable();
+
+	calculate_sigpending();
+}
+
+static inline void rpal_prepare_task_switch(struct rq *rq,
+					    struct task_struct *prev,
+					    struct task_struct *next)
+{
+	kcov_prepare_switch(prev);
+	sched_info_switch(rq, prev, next);
+	perf_event_task_sched_out(prev, next);
+	rseq_preempt(prev);
+	fire_sched_out_preempt_notifiers(prev, next);
+	kmap_local_sched_out();
+	prepare_task(next);
+	prepare_arch_switch(next);
+}
+
+static struct rq *rpal_finish_task_switch(struct task_struct *prev)
+	__releases(rq->lock)
+{
+	struct rq *rq = this_rq();
+	struct mm_struct *mm = rq->prev_mm;
+
+	if (WARN_ONCE(preempt_count() != 2 * PREEMPT_DISABLE_OFFSET,
+		      "corrupted preempt_count: %s/%d/0x%x\n", current->comm,
+		      current->pid, preempt_count()))
+		preempt_count_set(FORK_PREEMPT_COUNT);
+
+	rq->prev_mm = NULL;
+	vtime_task_switch(prev);
+	perf_event_task_sched_in(prev, current);
+	finish_task(prev);
+	tick_nohz_task_switch();
+
+	/* finish_lock_switch, not enable irq */
+	spin_acquire(&__rq_lockp(rq)->dep_map, 0, 0, _THIS_IP_);
+	__balance_callbacks(rq);
+	raw_spin_rq_unlock(rq);
+
+	finish_arch_post_lock_switch();
+	kcov_finish_switch(current);
+	kmap_local_sched_in();
+
+	fire_sched_in_preempt_notifiers(current);
+	if (mm) {
+		membarrier_mm_sync_core_before_usermode(mm);
+		mmdrop(mm);
+	}
+
+	return rq;
+}
+
+extern asmlinkage struct task_struct *
+__rpal_switch_to(struct task_struct *prev_p, struct task_struct *next_p);
+
+static __always_inline struct rq *rpal_context_switch(struct rq *rq,
+						      struct task_struct *prev,
+						      struct task_struct *next,
+						      struct rq_flags *rf)
+{
+	/* irq is off */
+	rpal_prepare_task_switch(rq, prev, next);
+	arch_start_context_switch(prev);
+
+	membarrier_switch_mm(rq, prev->active_mm, next->mm);
+	switch_mm_irqs_off(prev->active_mm, next->mm, next);
+
+	rq->clock_update_flags &= ~(RQCF_ACT_SKIP | RQCF_REQ_SKIP);
+	prepare_lock_switch(rq, next, rf);
+	__rpal_switch_to(prev, next);
+	barrier();
+	return rpal_finish_task_switch(prev);
+}
+
+struct task_struct *rpal_pick_next_task_fair(struct task_struct *prev,
+					     struct task_struct *next,
+					     struct rq *rq,
+					     struct rq_flags *rf);
+struct task_struct *rpal_pick_task_fair(struct rq *rq,
+					struct task_struct *next);
+
+static inline struct task_struct *
+__rpal_pick_next_task(struct rq *rq, struct task_struct *prev,
+		      struct task_struct *next, struct rq_flags *rf)
+{
+	struct task_struct *p;
+
+	if (likely(prev->sched_class == &fair_sched_class &&
+		   next->sched_class == &fair_sched_class)) {
+		p = rpal_pick_next_task_fair(prev, next, rq, rf);
+		return p;
+	}
+
+	BUG();
+}
+
+static struct task_struct *rpal_pick_next_task(struct rq *rq,
+					       struct task_struct *prev,
+					       struct task_struct *next,
+					       struct rq_flags *rf)
+{
+	struct task_struct *p;
+	const struct cpumask *smt_mask;
+	bool fi_before = false;
+	bool core_clock_updated = (rq == rq->core);
+	unsigned long cookie;
+	int i, cpu, occ = 0;
+	struct rq *rq_i;
+	bool need_sync;
+
+	if (!sched_core_enabled(rq))
+		return __rpal_pick_next_task(rq, prev, next, rf);
+
+	cpu = cpu_of(rq);
+
+	/* Stopper task is switching into idle, no need core-wide selection. */
+	if (cpu_is_offline(cpu)) {
+		/*
+		 * Reset core_pick so that we don't enter the fastpath when
+		 * coming online. core_pick would already be migrated to
+		 * another cpu during offline.
+		 */
+		rq->core_pick = NULL;
+		return __rpal_pick_next_task(rq, prev, next, rf);
+	}
+
+	/*
+	 * If there were no {en,de}queues since we picked (IOW, the task
+	 * pointers are all still valid), and we haven't scheduled the last
+	 * pick yet, do so now.
+	 *
+	 * rq->core_pick can be NULL if no selection was made for a CPU because
+	 * it was either offline or went offline during a sibling's core-wide
+	 * selection. In this case, do a core-wide selection.
+	 */
+	if (rq->core->core_pick_seq == rq->core->core_task_seq &&
+	    rq->core->core_pick_seq != rq->core_sched_seq) {
+		WRITE_ONCE(rq->core_sched_seq, rq->core->core_pick_seq);
+
+		if (rq->core_pick == next) {
+			put_prev_task(rq, prev);
+			set_next_task(rq, next);
+
+			rq->core_pick = NULL;
+			goto out;
+		}
+	}
+
+	put_prev_task_balance(rq, prev, rf);
+
+	smt_mask = cpu_smt_mask(cpu);
+	need_sync = !!rq->core->core_cookie;
+
+	/* reset state */
+	rq->core->core_cookie = 0UL;
+	if (rq->core->core_forceidle_count) {
+		if (!core_clock_updated) {
+			update_rq_clock(rq->core);
+			core_clock_updated = true;
+		}
+		sched_core_account_forceidle(rq);
+		/* reset after accounting force idle */
+		rq->core->core_forceidle_start = 0;
+		rq->core->core_forceidle_count = 0;
+		rq->core->core_forceidle_occupation = 0;
+		need_sync = true;
+		fi_before = true;
+	}
+
+	/*
+	 * core->core_task_seq, core->core_pick_seq, rq->core_sched_seq
+	 *
+	 * @task_seq guards the task state ({en,de}queues)
+	 * @pick_seq is the @task_seq we did a selection on
+	 * @sched_seq is the @pick_seq we scheduled
+	 *
+	 * However, preemptions can cause multiple picks on the same task set.
+	 * 'Fix' this by also increasing @task_seq for every pick.
+	 */
+	rq->core->core_task_seq++;
+
+	/*
+	 * Optimize for common case where this CPU has no cookies
+	 * and there are no cookied tasks running on siblings.
+	 */
+	if (!need_sync) {
+		next = rpal_pick_task_fair(rq, next);
+		if (!next->core_cookie) {
+			rq->core_pick = NULL;
+			/*
+			 * For robustness, update the min_vruntime_fi for
+			 * unconstrained picks as well.
+			 */
+			WARN_ON_ONCE(fi_before);
+			task_vruntime_update(rq, next, false);
+			goto out_set_next;
+		}
+	}
+
+	/*
+	 * For each thread: do the regular task pick and find the max prio task
+	 * amongst them.
+	 *
+	 * Tie-break prio towards the current CPU
+	 */
+	for_each_cpu_wrap(i, smt_mask, cpu) {
+		rq_i = cpu_rq(i);
+
+		/*
+		 * Current cpu always has its clock updated on entrance to
+		 * pick_next_task(). If the current cpu is not the core,
+		 * the core may also have been updated above.
+		 */
+		if (i != cpu && (rq_i != rq->core || !core_clock_updated))
+			update_rq_clock(rq_i);
+
+		if (i == cpu)
+			rq_i->core_pick = rpal_pick_task_fair(rq, next);
+		else
+			rq_i->core_pick = pick_task(rq_i);
+	}
+
+	cookie = rq->core->core_cookie = next->core_cookie;
+
+	/*
+	 * For each thread: try and find a runnable task that matches @max or
+	 * force idle.
+	 */
+	for_each_cpu(i, smt_mask) {
+		rq_i = cpu_rq(i);
+		p = rq_i->core_pick;
+
+		if (!cookie_equals(p, cookie)) {
+			p = NULL;
+			if (cookie)
+				p = sched_core_find(rq_i, cookie);
+			if (!p)
+				p = idle_sched_class.pick_task(rq_i);
+		}
+
+		rq_i->core_pick = p;
+
+		if (p == rq_i->idle) {
+			if (rq_i->nr_running) {
+				rq->core->core_forceidle_count++;
+				if (!fi_before)
+					rq->core->core_forceidle_seq++;
+			}
+		} else {
+			occ++;
+		}
+	}
+
+	if (schedstat_enabled() && rq->core->core_forceidle_count) {
+		rq->core->core_forceidle_start = rq_clock(rq->core);
+		rq->core->core_forceidle_occupation = occ;
+	}
+
+	rq->core->core_pick_seq = rq->core->core_task_seq;
+	next = rq->core_pick;
+	rq->core_sched_seq = rq->core->core_pick_seq;
+
+	/* Something should have been selected for current CPU */
+	WARN_ON_ONCE(!next);
+
+	/*
+	 * Reschedule siblings
+	 *
+	 * NOTE: L1TF -- at this point we're no longer running the old task and
+	 * sending an IPI (below) ensures the sibling will no longer be running
+	 * their task. This ensures there is no inter-sibling overlap between
+	 * non-matching user state.
+	 */
+	for_each_cpu(i, smt_mask) {
+		rq_i = cpu_rq(i);
+
+		/*
+		 * An online sibling might have gone offline before a task
+		 * could be picked for it, or it might be offline but later
+		 * happen to come online, but its too late and nothing was
+		 * picked for it.  That's Ok - it will pick tasks for itself,
+		 * so ignore it.
+		 */
+		if (!rq_i->core_pick)
+			continue;
+
+		/*
+		 * Update for new !FI->FI transitions, or if continuing to be in !FI:
+		 * fi_before     fi      update?
+		 *  0            0       1
+		 *  0            1       1
+		 *  1            0       1
+		 *  1            1       0
+		 */
+		if (!(fi_before && rq->core->core_forceidle_count))
+			task_vruntime_update(rq_i, rq_i->core_pick,
+					     !!rq->core->core_forceidle_count);
+
+		rq_i->core_pick->core_occupation = occ;
+
+		if (i == cpu) {
+			rq_i->core_pick = NULL;
+			continue;
+		}
+
+		/* Did we break L1TF mitigation requirements? */
+		WARN_ON_ONCE(!cookie_match(next, rq_i->core_pick));
+
+		if (rq_i->curr == rq_i->core_pick) {
+			rq_i->core_pick = NULL;
+			continue;
+		}
+
+		resched_curr(rq_i);
+	}
+
+out_set_next:
+	set_next_task(rq, next);
+out:
+	if (rq->core->core_forceidle_count && next == rq->idle)
+		queue_core_balance(rq);
+
+	return next;
+}
+
+__notrace_funcgraph __sched void rpal_schedule(struct task_struct *next)
+{
+	struct task_struct *prev, *picked;
+	unsigned long *switch_count;
+	bool preempt = false;
+	unsigned long prev_state;
+	struct rq_flags rf;
+	struct rq *rq;
+	int cpu;
+
+	preempt_disable();
+
+	cpu = smp_processor_id();
+	rq = cpu_rq(cpu);
+	prev = rq->curr;
+
+	schedule_debug(prev, !!SM_NONE);
+
+	if (sched_feat(HRTICK) || sched_feat(HRTICK_DL))
+		hrtick_clear(rq);
+
+	rcu_note_context_switch(preempt);
+	rq_lock(rq, &rf);
+	smp_mb__after_spinlock();
+
+	rq->clock_update_flags <<= 1;
+	update_rq_clock(rq);
+
+	switch_count = &prev->nivcsw;
+
+	prev_state = READ_ONCE(prev->__state);
+	if (!preempt && prev_state) {
+		if (signal_pending_state(prev_state, prev)) {
+			rpal_check_ep_ready_wait(prev, RPAL_EP_READY_WAIT_LS);
+			WRITE_ONCE(prev->__state, TASK_RUNNING);
+		} else {
+			prev->sched_contributes_to_load =
+				(prev_state & TASK_UNINTERRUPTIBLE) &&
+				!(prev_state & TASK_NOLOAD) &&
+				!(prev->flags & PF_FROZEN);
+
+			if (prev->sched_contributes_to_load)
+				rq->nr_uninterruptible++;
+
+			/*
+			 * __schedule()			ttwu()
+			 *   prev_state = prev->state;    if (p->on_rq && ...)
+			 *   if (prev_state)		    goto out;
+			 *     p->on_rq = 0;		  smp_acquire__after_ctrl_dep();
+			 *				  p->state = TASK_WAKING
+			 *
+			 * Where __schedule() and ttwu() have matching control dependencies.
+			 *
+			 * After this, schedule() must not care about p->state any more.
+			 */
+			deactivate_task(rq, prev,
+					DEQUEUE_SLEEP | DEQUEUE_NOCLOCK);
+
+			if (prev->in_iowait) {
+				atomic_inc(&rq->nr_iowait);
+				delayacct_blkio_start();
+			}
+		}
+		switch_count = &prev->nvcsw;
+	}
+
+	picked = rpal_pick_next_task(rq, prev, next, &rf);
+	if (unlikely(next != picked))
+		panic("rpal error: next != picked\n");
+
+	clear_tsk_need_resched(prev);
+	clear_preempt_need_resched();
+#ifdef CONFIG_SCHED_DEBUG
+	rq->last_seen_need_resched_ns = 0;
+#endif
+
+	rq->nr_switches++;
+	RCU_INIT_POINTER(rq->curr, next);
+	++*switch_count;
+	migrate_disable_switch(rq, prev);
+	psi_sched_switch(prev, next, !task_on_rq_queued(prev));
+	trace_sched_switch(preempt, prev, next);
+	rq = rpal_context_switch(rq, prev, next, &rf);
+	preempt_enable_no_resched();
+}
+#endif

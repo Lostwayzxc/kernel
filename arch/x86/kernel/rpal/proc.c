@@ -119,6 +119,9 @@ const struct proc_ops proc_rpal_operations = {
 
 static int __init proc_rpal_init(void)
 {
+	if (boot_cpu_has(X86_FEATURE_NORPAL))
+		return 0;
+
 	proc_create("rpal", 0644, NULL, &proc_rpal_operations);
 	return 0;
 }

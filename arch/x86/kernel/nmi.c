@@ -24,6 +24,7 @@
 #include <linux/export.h>
 #include <linux/atomic.h>
 #include <linux/sched/clock.h>
+#include <linux/rpal.h>
 
 #include <asm/cpu_entry_area.h>
 #include <asm/traps.h>
@@ -303,12 +304,23 @@ NOKPROBE_SYMBOL(unknown_nmi_error);
 static DEFINE_PER_CPU(bool, swallow_nmi);
 static DEFINE_PER_CPU(unsigned long, last_nmi_rip);
 
+#if IS_ENABLED(CONFIG_RPAL)
+DECLARE_PER_CPU(bool, rpal_nmi_handle);
+#endif
 static noinstr void default_do_nmi(struct pt_regs *regs)
 {
 	unsigned char reason = 0;
 	int handled;
 	bool b2b = false;
 
+#if IS_ENABLED(CONFIG_RPAL)
+	bool rpal_handle = false;
+
+	if (__this_cpu_read(rpal_nmi_handle)) {
+		__this_cpu_write(rpal_nmi_handle, false);
+		rpal_handle = true;
+	}
+#endif
 	/*
 	 * CPU-specific NMI must be processed before non-CPU-specific
 	 * NMI, otherwise we may lose it, because the CPU-specific
@@ -412,6 +424,15 @@ static noinstr void default_do_nmi(struct pt_regs *regs)
 	 */
 	if (b2b && __this_cpu_read(swallow_nmi))
 		__this_cpu_add(nmi_stats.swallow, 1);
+#if IS_ENABLED(CONFIG_RPAL)
+	/*
+	 * Lazy switch may clear the bit in active_mask, causing
+	 * nmi event not handled. This will lead to unknown nmi,
+	 * try to avoid this.
+	 */
+	else if (rpal_handle)
+		return;
+#endif
 	else
 		unknown_nmi_error(reason, regs);
 

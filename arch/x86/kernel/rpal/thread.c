@@ -364,6 +364,34 @@ void exit_rpal_thread(void)
 	rpal_put_service(cur);
 }
 
+int rpal_rebuild_sender_context_on_fault(struct pt_regs *regs,
+					 unsigned long addr, int error_code)
+{
+	if (rpal_test_current_thread_flag(RPAL_IS_SENDER_BIT)) {
+		struct rpal_sender_epoll_context *sec = current->rpal_sd->sec;
+		unsigned long erip, ersp;
+		int magic;
+
+		magic = sec->magic;
+		erip = sec->ec.erip;
+		ersp = sec->ec.ersp;
+		if (rpal_is_valid_magic(magic)) {
+			/* rebuild if receiver's memory is wrong(e.g. oom) */
+			rpal_rebuild_receiver_context_on_exit();
+			regs->ax = error_code;
+			regs->ip = erip;
+			regs->sp = ersp;
+			sec->magic = 0;
+			if (!rpal_is_correct_address(rpal_current_service(), regs->ip)) {
+				/* receiver has crashed */
+				sec->total_time += rdtsc_ordered() - sec->start_time;
+			}
+			return 0;
+		}
+	}
+	return -RPAL_ERR_INVAL;
+}
+
 int __init rpal_thread_init(void)
 {
 	sender_cache = kmem_cache_create("rpal_sender_cache",

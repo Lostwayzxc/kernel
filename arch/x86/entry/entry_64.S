@@ -46,6 +46,21 @@
 .code64
 .section .entry.text, "ax"
 
+#if IS_ENABLED(CONFIG_RPAL)
+SYM_CODE_START(rpal_ret_from_lazy_switch)
+	movq	%rax, %rdi
+	call	rpal_schedule_tail
+
+	movq	%rsp, %rdi
+	call	rpal_kernel_ret
+
+	movq	%rsp, %rdi
+	call	syscall_exit_to_user_mode	/* returns with IRQs disabled */
+
+	jmp	swapgs_restore_regs_and_return_to_usermode
+SYM_CODE_END(rpal_ret_from_lazy_switch)
+#endif
+
 /*
  * 64-bit SYSCALL instruction entry. Up to 6 arguments in registers.
  *
@@ -115,6 +130,10 @@ SYM_INNER_LABEL(entry_SYSCALL_64_after_hwframe, SYM_L_GLOBAL)
 	IBRS_ENTER
 	UNTRAIN_RET
 
+#if IS_ENABLED(CONFIG_RPAL)
+	ALTERNATIVE "jmp	do_rpal", "", X86_FEATURE_NORPAL
+_do_syscall:
+#endif
 	call	do_syscall_64		/* returns with IRQs disabled */
 
 	/*
@@ -221,6 +240,119 @@ syscall_return_via_sysret:
 	swapgs
 	sysretq
 SYM_CODE_END(entry_SYSCALL_64)
+
+#if IS_ENABLED(CONFIG_RPAL)
+SYM_CODE_START_LOCAL(do_rpal)
+	/*
+	 * We first check if it is a RPAL task with current->rpal_rs.
+	 * For non-RPAL task, we just skip it. And for rpal task, We
+	 * may need to check if it needs to do lazy switch.
+	 */
+	movq	PER_CPU_VAR(current_task), %r13
+	movq	TASK_rpal_cd(%r13), %rax
+	testq	%rax, %rax
+	jz		_do_syscall
+
+	movq	%rsp, %r14
+	call	rpal_syscall_64_context_switch
+	testq   %rax, %rax
+	jz		1f
+
+	/*
+	 * When we come here, everything but stack switching is finished.
+	 * This makes current task use another task's kernel stack. Thus,
+	 * we need to do stack switching here.
+	 *
+	 * At the meanwhile, the previous task's stack content is corrupted,
+	 * we also need to rebuild its stack frames, so that it will jump to
+	 * rpal_ret_from_lazy_switch when it is scheduled in. This is inspired
+	 * by ret_from_fork.
+	 */
+	movq    TASK_threadsp(%rax), %rsp
+#ifdef CONFIG_STACKPROTECTOR
+	movq	TASK_stack_canary(%rax), %rbx
+	movq	%rbx, PER_CPU_VAR(fixed_percpu_data) + stack_canary_offset
+#endif
+	/* rebuild src's frame */
+	movq	$rpal_ret_from_lazy_switch, -8(%r14)
+	leaq	-56(%r14), %rbx
+	movq	%rbx, TASK_threadsp(%r13)
+
+	movq	%r13, %rdi
+	/*
+	 * Everything of task switch is done, but we still need to do
+	 * a little extra things for lazy switch.
+	 */
+	call	rpal_lazy_switch_tail
+
+1:
+	movq	ORIG_RAX(%rsp), %rsi
+	movq	%rsp, %rdi
+	jmp		_do_syscall
+SYM_CODE_END(do_rpal)
+
+SYM_CODE_START_LOCAL(do_rpal_error)
+	/* This is the same as syscall entry */
+	movq	PER_CPU_VAR(current_task), %r13
+	movq	TASK_rpal_cd(%r13), %rdi
+	testq   %rdi, %rdi
+	jz		_do_error
+	popq	%r12
+	movq	%rax, %rsp
+	movq	%rax, %r14
+	movq	%rax, %rdi
+	call	rpal_exception_context_switch
+	testq   %rax, %rax
+	jz		1f
+
+	movq	TASK_threadsp(%rax), %rsp
+	ENCODE_FRAME_POINTER
+#ifdef CONFIG_STACKPROTECTOR
+	movq	TASK_stack_canary(%rax), %rbx
+	movq	%rbx, PER_CPU_VAR(fixed_percpu_data) + stack_canary_offset
+#endif
+	/* rebuild src's frame */
+	movq	$rpal_ret_from_lazy_switch, -8(%r14)
+	leaq	-56(%r14), %rbx
+	movq	%rbx, TASK_threadsp(%r13)
+
+	movq	%r13, %rdi
+	call	rpal_lazy_switch_tail
+1:
+	movq	%rsp, %rax
+	pushq	%r12
+	jmp		_do_error
+SYM_CODE_END(do_rpal_error)
+
+SYM_CODE_START_LOCAL(do_rpal_nmi)
+	/* This is the same as syscall entry */
+	movq	PER_CPU_VAR(current_task), %r13
+	movq	TASK_rpal_cd(%r13), %rdi
+	testq   %rdi, %rdi
+	jz		_do_nmi
+	movq	%rsp, %r14
+	movq	%rsp, %rdi
+	call	rpal_nmi_context_switch
+	testq   %rax, %rax
+	jz		_do_nmi
+
+	movq    TASK_threadsp(%rax), %rsp
+	ENCODE_FRAME_POINTER
+#ifdef CONFIG_STACKPROTECTOR
+	movq	TASK_stack_canary(%rax), %rbx
+	movq	%rbx, PER_CPU_VAR(fixed_percpu_data) + stack_canary_offset
+#endif
+	/* rebuild src's frame */
+	movq	$rpal_ret_from_lazy_switch, -8(%r14)
+	leaq	-56(%r14), %rbx
+	movq	%rbx, TASK_threadsp(%r13)
+
+	movq	%r13, %rdi
+	call	rpal_lazy_switch_tail
+
+	jmp		_do_nmi
+SYM_CODE_END(do_rpal_nmi)
+#endif
 
 /*
  * %rdi: prev task
@@ -1038,6 +1170,10 @@ SYM_CODE_START_LOCAL(error_entry)
 
 	/* Put us onto the real thread stack. */
 	call	sync_regs
+#if IS_ENABLED(CONFIG_RPAL)
+	ALTERNATIVE "jmp	do_rpal_error", "", X86_FEATURE_NORPAL
+_do_error:
+#endif
 	RET
 
 	/*
@@ -1194,6 +1330,10 @@ SYM_CODE_START(asm_exc_nmi)
 
 	IBRS_ENTER
 	UNTRAIN_RET
+#if IS_ENABLED(CONFIG_RPAL)
+	ALTERNATIVE "jmp	do_rpal_nmi", "", X86_FEATURE_NORPAL
+_do_nmi:
+#endif
 
 	/*
 	 * At this point we no longer need to worry about stack damage

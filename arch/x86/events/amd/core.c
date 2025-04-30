@@ -8,6 +8,7 @@
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include <linux/static_call.h>
+#include <linux/rpal.h>
 #include <asm/apicdef.h>
 #include <asm/apic.h>
 #include <asm/nmi.h>
@@ -720,6 +721,10 @@ static void amd_pmu_wait_on_overflow(int idx)
 	}
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+DECLARE_PER_CPU(bool, rpal_nmi);
+#endif
+
 static void amd_pmu_check_overflow(void)
 {
 	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
@@ -732,6 +737,11 @@ static void amd_pmu_check_overflow(void)
 	 */
 	if (in_nmi())
 		return;
+
+#if IS_ENABLED(CONFIG_RPAL)
+	if (this_cpu_read(rpal_nmi))
+		return;
+#endif
 
 	/*
 	 * Check each counter for overflow and wait for it to be reset by the
@@ -810,6 +820,12 @@ static void amd_pmu_disable_event(struct perf_event *event)
 	 */
 	if (in_nmi())
 		return;
+
+	/* fix conflict with AMD nmi logic */
+#if IS_ENABLED(CONFIG_RPAL)
+	if (this_cpu_read(rpal_nmi))
+		return;
+#endif
 
 	amd_pmu_wait_on_overflow(event->hw.idx);
 }

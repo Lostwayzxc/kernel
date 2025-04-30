@@ -86,9 +86,18 @@ enum rpal_task_flag_bits {
 	RPAL_IS_SENDER_BIT,
 	RPAL_IS_RECEIVER_BIT,
 	RPAL_WAKE_BIT,
+	RPAL_LAZY_SWITCHED_BIT,
+	RPAL_CPU_LOCKED_BIT,
 	RPAL_SYSCALL_ENTER_BIT,
 	RPAL_RECEIVER_KERNEL_RET_BIT,
 };
+
+#define RPAL_EP_SID_SHIFT 24
+#define RPAL_EP_ID_SHIFT 8
+#define RPAL_EP_STATUS_MASK ((1 << RPAL_EP_ID_SHIFT) - 1)
+#define RPAL_EP_SID_MASK (~((1 << RPAL_EP_SID_SHIFT) - 1))
+#define RPAL_EP_ID_MASK (~(0 | RPAL_EP_STATUS_MASK | RPAL_EP_SID_MASK))
+#define RPAL_EP_MAX_ID ((1 << (RPAL_EP_SID_SHIFT - RPAL_EP_ID_SHIFT)) - 1)
 
 /*
  * Following structures should have the same memory layout with user.
@@ -403,6 +412,13 @@ int rpal_get_epitemfd(wait_queue_entry_t *wait);
 void *rpal_get_epitemep(wait_queue_entry_t *wait);
 void rpal_pick_mmap_base(struct mm_struct *mm, struct rlimit *rlim_stack);
 int rpal_ep_autoremove_wake_function(wait_queue_entry_t *curr,
-	unsigned int mode, int wake_flags,
-	void *key);
+				     unsigned int mode, int wake_flags,
+				     void *key);
+int rpal_set_cpus_allowed_ptr(struct task_struct *p, bool is_lock,
+			      bool is_kernel_ret);
+int rpal_try_to_wake_up(struct task_struct *p);
+void rpal_resume_ep(struct task_struct *tsk);
+void rpal_ep_poll_nosched(struct rpal_receiver_data *rrd, struct pt_regs *regs);
+void rpal_remove_ep_wait_list(struct rpal_receiver_data *rrd);
+int rpal_ep_send_events(void *ep, struct rpal_receiver_epoll_context *rec);
 #endif /* _LINUX_RPAL_H_ */

@@ -47,13 +47,6 @@ enum rpal_task_status {
 	RPAL_TASK_KERNEL_RET,
 };
 
-#define RPAL_EP_SID_SHIFT 24
-#define RPAL_EP_ID_SHIFT 8
-#define RPAL_EP_STATUS_MASK ((1 << RPAL_EP_ID_SHIFT) - 1)
-#define RPAL_EP_SID_MASK (~((1 << RPAL_EP_SID_SHIFT) - 1))
-#define RPAL_EP_ID_MASK (~(0 | RPAL_EP_STATUS_MASK | RPAL_EP_SID_MASK))
-#define RPAL_EP_MAX_ID ((1 << (RPAL_EP_SID_SHIFT - RPAL_EP_ID_SHIFT)) - 1)
-
 extern bool rpal_inited;
 
 static inline struct rpal_shared_page *

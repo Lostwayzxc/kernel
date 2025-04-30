@@ -218,6 +218,8 @@ struct task_struct init_task
 	.rpal_rs = NULL,
 	.rpal_cd = NULL,
 	.rpal_sd = NULL,
+	.fix_runtime = 0,
+	.total_runtime = 0,
 	.rpal_flag = 0,
 #endif
 };

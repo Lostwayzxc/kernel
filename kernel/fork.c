@@ -991,6 +991,8 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	tsk->rpal_rs = NULL;
 	tsk->rpal_cd = NULL;
 	tsk->rpal_sd = NULL;
+	tsk->fix_runtime = 0;
+	tsk->total_runtime = 0;
 	tsk->rpal_flag = 0;
 #endif
 

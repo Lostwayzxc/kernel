@@ -744,6 +744,8 @@ struct task_struct {
 		struct rpal_sender_data *rpal_sd;
 		struct rpal_receiver_data *rpal_rd;
 	};
+	s64 fix_runtime;
+	s64 total_runtime;
 	unsigned long rpal_flag;
 #endif
 	/*

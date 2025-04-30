@@ -39,6 +39,7 @@
 #include <linux/io.h>
 #include <linux/ftrace.h>
 #include <linux/syscalls.h>
+#include <linux/rpal.h>
 
 #include <asm/processor.h>
 #include <asm/pkru.h>
@@ -543,6 +544,34 @@ void compat_start_thread(struct pt_regs *regs, u32 new_ip, u32 new_sp, bool x32)
 }
 #endif
 
+#if IS_ENABLED(CONFIG_RPAL)
+void rpal_set_ep_status(struct task_struct *prev_p)
+{
+	if (READ_ONCE(prev_p->__state) == TASK_INTERRUPTIBLE) {
+		atomic_cmpxchg(&prev_p->rpal_rd->rec->ep_status,
+				RPAL_EP_READY_WAIT, RPAL_EP_WAIT);
+	} else {
+		/*
+		 * Simply check RPAL_EP_READY_WAIT is not enough. It is possible
+		 * task's state is TASK_RUNNING. Consider following case:
+		 *
+		 * CPU 0(prev_p)            CPU 1(waker)
+		 * set TASK_INTERRUPTIBLE
+		 * set EP_READY_WAIT
+		 *                          check TASK_INTERRUPTIBLE
+		 * clear EP_READY_WAIT
+		 * clear TASK_INTERRUPTIBLE
+		 * set TASK_INTERRUPTIBLE
+		 * set EP_READY_WAIT
+		 *                          ttwu_runnable()
+		 * schedule()
+		 */
+		atomic_cmpxchg(&prev_p->rpal_rd->rec->ep_status,
+			       RPAL_EP_READY_WAIT, RPAL_EP_SYS);
+	}
+}
+#endif
+
 /*
  *	switch_to(x,y) should switch tasks from x to y.
  *
@@ -654,11 +683,88 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 			loadsegment(ss, __KERNEL_DS);
 	}
 
+#if IS_ENABLED(CONFIG_RPAL)
+	/*
+	 * When we come to here, the stack switching is finished. Therefore,
+	 * the receiver thread is prepared for a lazy switch. We then change
+	 * the ep_status from RPAL_EP_READY_WAIT to RPAL_EP_WAIT and other
+	 * thread is able to call it with RPAL call.
+	 */
+	if (rpal_test_task_thread_flag(prev_p, RPAL_IS_RECEIVER_BIT))
+		rpal_set_ep_status(prev_p);
+#endif
+
 	/* Load the Intel cache allocation PQR MSR. */
 	resctrl_sched_in(next_p);
 
 	return prev_p;
 }
+
+#if IS_ENABLED(CONFIG_RPAL)
+__visible __notrace_funcgraph struct task_struct *
+__rpal_switch_to(struct task_struct *prev_p, struct task_struct *next_p)
+{
+	struct thread_struct *prev = &prev_p->thread;
+	struct thread_struct *next = &next_p->thread;
+	int cpu = smp_processor_id();
+
+	WARN_ON_ONCE(IS_ENABLED(CONFIG_DEBUG_ENTRY) &&
+		     this_cpu_read(hardirq_stack_inuse));
+
+	/* __fpu_invalidate_fpregs_state(&prev->fpu) */
+	prev->fpu.last_cpu = -1;
+	/* fpregs_activate(&next_p->thread.fpu) */
+	__this_cpu_write(fpu_fpregs_owner_ctx, &next_p->thread.fpu);
+	trace_x86_fpu_regs_activated(&next_p->thread.fpu);
+	next_p->thread.fpu.last_cpu = cpu;
+	clear_tsk_thread_flag(next_p, TIF_NEED_FPU_LOAD);
+
+	savesegment(gs, prev_p->thread.gsindex);
+	if (static_cpu_has(X86_FEATURE_FSGSBASE))
+		prev_p->thread.gsbase = __rdgsbase_inactive();
+	else
+		save_base_legacy(prev_p, prev_p->thread.gsindex, GS);
+
+	load_TLS(next, cpu);
+
+	arch_end_context_switch(next_p);
+
+	savesegment(es, prev->es);
+	if (unlikely(next->es | prev->es))
+		loadsegment(es, next->es);
+
+	savesegment(ds, prev->ds);
+	if (unlikely(next->ds | prev->ds))
+		loadsegment(ds, next->ds);
+
+	if (static_cpu_has(X86_FEATURE_FSGSBASE)) {
+		if (unlikely(prev->gsindex || next->gsindex))
+			loadseg(GS, next->gsindex);
+
+		__wrgsbase_inactive(next->gsbase);
+	} else {
+		load_seg_legacy(prev->gsindex, prev->gsbase, next->gsindex,
+				next->gsbase, GS);
+	}
+
+	this_cpu_write(current_task, next_p);
+	this_cpu_write(cpu_current_top_of_stack, task_top_of_stack(next_p));
+
+	update_task_stack(next_p);
+	switch_to_extra(prev_p, next_p);
+
+	if (static_cpu_has_bug(X86_BUG_SYSRET_SS_ATTRS)) {
+		unsigned short ss_sel;
+
+		savesegment(ss, ss_sel);
+		if (ss_sel != __KERNEL_DS)
+			loadsegment(ss, __KERNEL_DS);
+	}
+	resctrl_sched_in(next_p);
+
+	return prev_p;
+}
+#endif
 
 void set_personality_64bit(void)
 {

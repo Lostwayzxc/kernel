@@ -36,7 +36,9 @@ static void __used common(void)
 #ifdef CONFIG_STACKPROTECTOR
 	OFFSET(TASK_stack_canary, task_struct, stack_canary);
 #endif
-
+#if IS_ENABLED(CONFIG_RPAL)
+	OFFSET(TASK_rpal_cd, task_struct, rpal_cd);
+#endif
 	BLANK();
 	OFFSET(crypto_tfm_ctx_offset, crypto_tfm, __crt_ctx);
 

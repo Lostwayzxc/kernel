@@ -2313,6 +2313,18 @@ void rpal_ep_poll_nosched(struct rpal_receiver_data *rrd, struct pt_regs *regs)
 	}
 }
 
+void rpal_remove_ep_wait_list(struct rpal_receiver_data *rrd)
+{
+	struct eventpoll *ep = (struct eventpoll *)rrd->ep;
+	wait_queue_entry_t *wait = &rrd->ep_wait;
+
+	if (!list_empty_careful(&wait->entry)) {
+		write_lock_irq(&ep->lock);
+		__remove_wait_queue(&ep->wq, wait);
+		write_unlock_irq(&ep->lock);
+	}
+}
+
 void *rpal_get_epitemep(wait_queue_entry_t *wait)
 {
 	struct epitem *epi = ep_item_from_wait(wait);

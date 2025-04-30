@@ -7615,6 +7615,134 @@ static struct task_struct *__pick_next_task_fair(struct rq *rq)
 	return pick_next_task_fair(rq, NULL, NULL);
 }
 
+
+#if IS_ENABLED(CONFIG_RPAL)
+static void rpal_unthrottle(struct rq *rq, struct task_struct *next)
+{
+	struct sched_entity *se;
+	struct cfs_rq *cfs_rq;
+
+	se = &next->se;
+	for_each_sched_entity(se) {
+		cfs_rq = cfs_rq_of(se);
+		if (cfs_rq_throttled(cfs_rq))
+			unthrottle_cfs_rq(cfs_rq);
+
+		if (cfs_rq == &rq->cfs)
+			break;
+	}
+}
+
+struct task_struct *rpal_pick_task_fair(struct rq *rq, struct task_struct *next)
+{
+	struct sched_entity *se;
+	struct cfs_rq *cfs_rq;
+
+	rpal_unthrottle(rq, next);
+
+	se = &next->se;
+	for_each_sched_entity(se) {
+		struct sched_entity *curr;
+
+		cfs_rq = cfs_rq_of(se);
+		curr = cfs_rq->curr;
+
+		if (curr) {
+			if (curr->on_rq)
+				update_curr(cfs_rq);
+			else
+				curr = NULL;
+		}
+		clear_buddies(cfs_rq, se);
+	}
+
+	return next;
+}
+
+struct task_struct *rpal_pick_next_task_fair(struct task_struct *prev,
+					     struct task_struct *next,
+					     struct rq *rq, struct rq_flags *rf)
+{
+	struct cfs_rq *cfs_rq;
+	struct sched_entity *se;
+	struct task_struct *p;
+
+	rpal_unthrottle(rq, next);
+
+	if (!sched_fair_runnable(rq))
+		panic("rpal error: !sched_fair_runnable\n");
+
+#ifdef CONFIG_FAIR_GROUP_SCHED
+	/*
+	 * Because of the set_next_buddy() in dequeue_task_fair() it is rather
+	 * likely that a next task is from the same cgroup as the current.
+	 *
+	 * Therefore attempt to avoid putting and setting the entire cgroup
+	 * hierarchy, only change the part that actually changes.
+	 */
+
+	se = &next->se;
+	for_each_sched_entity(se) {
+		struct sched_entity *curr;
+
+		cfs_rq = cfs_rq_of(se);
+		curr = cfs_rq->curr;
+
+		if (curr) {
+			if (curr->on_rq)
+				update_curr(cfs_rq);
+			else
+				curr = NULL;
+		}
+		clear_buddies(cfs_rq, se);
+	}
+	se = &next->se;
+	p = task_of(se);
+
+	/*
+	 * Since we haven't yet done put_prev_entity and if the selected task
+	 * is a different task than we started out with, try and touch the
+	 * least amount of cfs_rqs.
+	 */
+	if (prev != p) {
+		struct sched_entity *pse = &prev->se;
+
+		while (!(cfs_rq = is_same_group(se, pse))) {
+			int se_depth = se->depth;
+			int pse_depth = pse->depth;
+
+			if (se_depth <= pse_depth) {
+				put_prev_entity(cfs_rq_of(pse), pse);
+				pse = parent_entity(pse);
+			}
+			if (se_depth >= pse_depth) {
+				set_next_entity(cfs_rq_of(se), se);
+				se = parent_entity(se);
+			}
+		}
+
+		put_prev_entity(cfs_rq, pse);
+		set_next_entity(cfs_rq, se);
+	}
+#endif
+#ifdef CONFIG_SMP
+	/*
+	 * Move the next running task to the front of
+	 * the list, so our cfs_tasks list becomes MRU
+	 * one.
+	 */
+	list_move(&p->se.group_node, &rq->cfs_tasks);
+#endif
+
+	if (hrtick_enabled(rq))
+		hrtick_start_fair(rq, p);
+
+	update_misfit_status(p, rq);
+
+	return p;
+}
+#endif
+
 /*
  * Account for a descheduled task:
  */

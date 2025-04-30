@@ -26,6 +26,7 @@
 #include <linux/elf-randomize.h>
 #include <trace/events/power.h>
 #include <linux/hw_breakpoint.h>
+#include <linux/rpal.h>
 #include <asm/cpu.h>
 #include <asm/apic.h>
 #include <linux/uaccess.h>
@@ -79,6 +80,19 @@ EXPORT_PER_CPU_SYMBOL(cpu_tss_rw);
 DEFINE_PER_CPU(bool, __tss_limit_invalid);
 EXPORT_PER_CPU_SYMBOL_GPL(__tss_limit_invalid);
 
+#if IS_ENABLED(CONFIG_RPAL)
+void rpal_fix_task_dump(struct task_struct *dst,
+			      struct task_struct *src)
+{
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&src->pi_lock, flags);
+	if (rpal_test_task_thread_flag(src, RPAL_CPU_LOCKED_BIT))
+		cpumask_copy(&dst->cpus_mask, &src->rpal_cd->old_mask);
+	raw_spin_unlock_irqrestore(&src->pi_lock, flags);
+}
+#endif
+
 /*
  * this gets called so that we can store lazy state into memory and copy the
  * current task into the new thread.
@@ -88,6 +102,11 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 	memcpy(dst, src, arch_task_struct_size);
 #ifdef CONFIG_VM86
 	dst->thread.vm86 = NULL;
+#endif
+#if IS_ENABLED(CONFIG_RPAL)
+	/* cpu maybe locked when thread forks, resume cpu lock */
+	if (src->rpal_rs)
+		rpal_fix_task_dump(dst, src);
 #endif
 	/* Drop the copied pointer to current's fpstate */
 	dst->thread.fpu.fpstate = NULL;

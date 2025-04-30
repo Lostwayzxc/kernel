@@ -6,6 +6,7 @@
 #include <linux/livepatch.h>
 #include <linux/audit.h>
 #include <linux/tick.h>
+#include <linux/rpal.h>
 
 #include "common.h"
 
@@ -97,6 +98,30 @@ long syscall_enter_from_user_mode_work(struct pt_regs *regs, long syscall)
 	return __syscall_enter_from_user_work(regs, syscall);
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+int rpal_syscall_enter(int nr, struct pt_regs *regs)
+{
+	struct thread_info *ti = current_thread_info();
+	unsigned long work = READ_ONCE(ti->syscall_work);
+	unsigned long orig_val;
+
+	rpal_clear_current_thread_flag(RPAL_SYSCALL_ENTER_BIT);
+	/*
+	 * audit module need to use the return value,
+	 * If a lazy switch happens, We can assume we
+	 * have 1 as the return value in last epoll_wait().
+	 */
+	orig_val = regs->ax;
+	regs->ax = 1;
+	/* only handle audit */
+	if (unlikely(work & SYSCALL_WORK_EXIT))
+		audit_syscall_exit(regs);
+	regs->ax = orig_val;
+
+	return 0;
+}
+#endif
+
 noinstr long syscall_enter_from_user_mode(struct pt_regs *regs, long syscall)
 {
 	long ret;
@@ -105,6 +130,10 @@ noinstr long syscall_enter_from_user_mode(struct pt_regs *regs, long syscall)
 
 	instrumentation_begin();
 	local_irq_enable();
+#if IS_ENABLED(CONFIG_RPAL)
+	if (unlikely(rpal_test_current_thread_flag(RPAL_SYSCALL_ENTER_BIT)))
+		rpal_syscall_enter(syscall, regs);
+#endif
 	ret = __syscall_enter_from_user_work(regs, syscall);
 	instrumentation_end();
 
