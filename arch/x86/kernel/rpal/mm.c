@@ -201,6 +201,9 @@ out:
 int rpal_map_service(struct rpal_service *tgt)
 {
 	struct rpal_service *cur = rpal_current_service();
+#ifdef CONFIG_RPAL_PKU
+	struct rpal_mapped_service *node;
+#endif
 	struct mm_struct *cur_mm, *tgt_mm;
 	unsigned long cur_addr, tgt_addr;
 	p4d_t cur_p4d, tgt_p4d;
@@ -225,10 +228,23 @@ int rpal_map_service(struct rpal_service *tgt)
 	if (ret)
 		goto put_tgt;
 
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled()) {
+		node = rpal_get_mapped_node(cur, tgt->id);
+		pkey = node->pkey;
+	}
+#endif
+
 	ret = mm_link_p4d(cur_mm, tgt_p4d, tgt_addr, pkey);
 	if (ret)
 		goto put_tgt;
 
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled()) {
+		node = rpal_get_mapped_node(tgt, cur->id);
+		pkey = node->pkey;
+	}
+#endif
 	ret = mm_link_p4d(tgt_mm, cur_p4d, cur_addr, pkey);
 	if (ret) {
 		mm_unlink_p4d(cur_mm, tgt_addr);

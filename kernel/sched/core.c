@@ -11334,6 +11334,10 @@ asmlinkage __visible void rpal_schedule_tail(struct task_struct *prev)
 	 */
 
 	finish_task_switch(prev);
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled())
+		rpal_set_pku_schedule_tail(prev);
+#endif
 	preempt_enable();
 
 	calculate_sigpending();

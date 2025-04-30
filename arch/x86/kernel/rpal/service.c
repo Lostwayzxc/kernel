@@ -299,6 +299,10 @@ static int add_mapped_service(struct rpal_service *rs, struct rpal_service *tgt,
 			}
 		}
 	}
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled() && type_bit == RPAL_REQUEST_MAP)
+		node->pkey = pkey;
+#endif
 
 unlock:
 	spin_unlock_irqrestore(&rs->lock, flags);
@@ -447,8 +451,17 @@ long rpal_request_service(u64 key, void __user *to)
 		goto put_service;
 	}
 
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled() && cur->pkey == tgt->pkey) {
+		ret = -RPAL_ERR_INVAL;
+		goto put_service;
+	}
+#endif
 	rsm = tgt->rsm;
-
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled())
+		rsm.pkey = tgt->pkey;
+#endif
 	ret = copy_to_user(to, &rsm, size);
 	if (ret) {
 		ret = -RPAL_ERR_RETRY;
@@ -586,10 +599,24 @@ long rpal_enable_service(void __user *u_data, void __user *k_data, bool is_new)
 	rsm.key = cur->key;
 	rsm.id = cur->id;
 
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled()) {
+		rsm.pkey = rpal_alloc_pkey(cur, rsm.pkey);
+		/* if pkey is invalid, choose id % 16 as pkey */
+		if (rsm.pkey == 16)
+			rsm.pkey = cur->id % 16;
+	}
+#endif
+
 	if (copy_to_user(u_data, &rsm, size)) {
 		ret = -RPAL_ERR_RETRY;
 		goto unlock_mutex;
 	}
+
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled())
+		rpal_pkey_setup(cur, rsm.pkey);
+#endif
 
 	spin_lock_irqsave(&cur->lock, flags);
 	if (!cur->enabled) {
@@ -661,6 +688,11 @@ static void rpal_service_data_init(struct rpal_service *rs)
 	rs->rcs.ret_begin = 0;
 	rs->rcs.ret_end = 0;
 
+#ifdef CONFIG_RPAL_PKU
+	rs->pkey = -1;
+	rs->pku_on = false;
+#endif
+
 	spin_lock_init(&rs->waker.lock);
 	INIT_LIST_HEAD(&rs->waker.wake_head);
 
@@ -710,6 +742,10 @@ static struct rpal_service *rpal_register_service(int service_id)
 	set_bit(RPAL_REQUEST_MAP, &node->type);
 	set_bit(RPAL_REVERSE_MAP, &node->type);
 	bitmap_zero(rs->mapped_service_bitmap, RPAL_NR_ID);
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled())
+		rpal_service_pku_init(rs);
+#endif
 
 	/* receiver may miss wake up if in lazy switch, try to wake it later */
 	rpal_enable_waker(&rs->waker);
@@ -756,6 +792,11 @@ void rpal_unregister_service(struct rpal_service *rs)
 			 (unsigned long)current->mm->rpal_rs,
 			 (unsigned long)rs);
 	}
+
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled())
+		rpal_service_pkey_exit(current);
+#endif
 
 	pr_debug("rpal: unregister service, id: %d, tgid: %d\n", rs->id,
 		rs->leader_thread->tgid);

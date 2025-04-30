@@ -382,6 +382,14 @@ int rpal_rebuild_sender_context_on_fault(struct pt_regs *regs,
 			regs->ip = erip;
 			regs->sp = ersp;
 			sec->magic = 0;
+#ifdef CONFIG_RPAL_PKU
+			if (rpal_pku_enabled()) {
+				rpal_set_current_pkru(
+					rpal_pkey_to_pkru(
+						rpal_current_service()->pkey),
+					RPAL_PKRU_SET);
+			}
+#endif
 			if (!rpal_is_correct_address(rpal_current_service(), regs->ip)) {
 				/* receiver has crashed */
 				sec->total_time += rdtsc_ordered() - sec->start_time;

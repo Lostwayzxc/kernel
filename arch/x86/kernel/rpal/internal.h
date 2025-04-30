@@ -26,6 +26,7 @@ enum rpal_command_type {
 	RPAL_CMD_REGISTER_THREAD,
 	RPAL_CMD_UDS_FDMAP,
 	RPAL_CMD_GET_SERVICE_ID,
+	RPAL_CMD_GET_SERVICE_PKEY,
 	RPAL_NR_CMD,
 };
 
@@ -106,3 +107,24 @@ long rpal_unregister_sender(void);
 long rpal_register_receiver(unsigned long addr);
 long rpal_unregister_receiver(void);
 int __init rpal_thread_init(void);
+
+/* pku.c */
+int rpal_alloc_pkey(struct rpal_service *rs, int pkey);
+int rpal_pkey_setup(struct rpal_service *rs, int pkey);
+void rpal_service_pku_init(struct rpal_service *rs);
+void rpal_service_pkey_exit(struct task_struct *tsk);
+void rpal_set_current_pkru(u32 val, int mode);
+
+#ifdef CONFIG_RPAL_PKU
+#define PKEY_OFFSET 59
+#define PKEY_MASK ((_AC(0xf, UL) << PKEY_OFFSET))
+static inline unsigned long rpal_update_pkey(unsigned long val, int pkey)
+{
+	return (val & ~_PAGE_PKEY_MASK) |
+	       (((unsigned long)pkey) << PKEY_OFFSET);
+}
+static inline unsigned long rpal_update_pfn(unsigned long val, unsigned long pfn)
+{
+	return (val & PTE_FLAGS_MASK) | (pfn << PAGE_SHIFT);
+}
+#endif

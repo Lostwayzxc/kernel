@@ -10,3 +10,12 @@ config RPAL
 	  version of rpal-lib is also needed. Say y if both of the conditions
 	  are satisfied. Otherwise, say N.
 
+config RPAL_PKU
+	bool "mpk protection for RPAL"
+	default n
+	depends on RPAL && SMP && !X86_PAE
+	help
+	  Memory protection key (MPK) can achieve intra-process memory separation
+	  which is broken by RPAL, Always keep it on when use rpal. CPU feature will
+	  be detected at boot time as some CPUs do not support it. Can be disabled
+	  with 'rpal_no_pku' kernel boot parameter.

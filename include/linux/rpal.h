@@ -72,6 +72,17 @@
 #define RPAL_KERNEL_PENDING 0x1
 #define RPAL_USER_PENDING 0x2
 
+#define RPAL_PKRU_BASE_CODE 0xFFFFFFFF
+#define RPAL_PKRU_BASE_CODE_READ 0xAAAAAAAA
+#define RPAL_NO_INDEX 16
+
+#define RPAL_NO_PKEY -1
+
+#define RPAL_PKRU_SET 0
+#define RPAL_PKRU_UNION 1
+#define RPAL_PKRU_INTERSECT 2
+
+
 enum rpal_epoll_status {
 	RPAL_EP_SYS,
 	RPAL_EP_KSYS,
@@ -92,12 +103,16 @@ enum rpal_task_flag_bits {
 	RPAL_RECEIVER_KERNEL_RET_BIT,
 };
 
+enum { RPAL_CAP_PKU };
+
 #define RPAL_EP_SID_SHIFT 24
 #define RPAL_EP_ID_SHIFT 8
 #define RPAL_EP_STATUS_MASK ((1 << RPAL_EP_ID_SHIFT) - 1)
 #define RPAL_EP_SID_MASK (~((1 << RPAL_EP_SID_SHIFT) - 1))
 #define RPAL_EP_ID_MASK (~(0 | RPAL_EP_STATUS_MASK | RPAL_EP_SID_MASK))
 #define RPAL_EP_MAX_ID ((1 << (RPAL_EP_SID_SHIFT - RPAL_EP_ID_SHIFT)) - 1)
+
+extern unsigned long rpal_cap;
 
 /*
  * Following structures should have the same memory layout with user.
@@ -264,6 +279,11 @@ struct rpal_service {
 	bool bad_service;
 	bool enabled;
 
+#ifdef CONFIG_RPAL_PKU
+	int pkey;
+	int pku_on;
+#endif
+
 	/* map for services required, being required and mapped  */
 	struct rpal_mapped_service service_map[RPAL_NR_ID];
 	DECLARE_BITMAP(mapped_service_bitmap, RPAL_NR_ID);
@@ -368,6 +388,32 @@ static inline void rpal_clear_current_thread_flag(unsigned long bit)
 	clear_bit(bit, &current->rpal_flag);
 }
 
+static inline void rpal_set_cap(unsigned long cap)
+{
+	set_bit(cap, &rpal_cap);
+}
+
+static inline void rpal_clear_cap(unsigned long cap)
+{
+	clear_bit(cap, &rpal_cap);
+}
+
+static inline bool rpal_has_cap(unsigned long cap)
+{
+	return test_bit(cap, &rpal_cap);
+}
+
+static inline bool rpal_pku_enabled(void)
+{
+	return rpal_has_cap(RPAL_CAP_PKU);
+}
+
+static inline struct rpal_service *
+rpal_get_task_service(struct task_struct *task)
+{
+	return rpal_get_service(task->rpal_rs);
+}
+
 void exit_rpal(bool group_dead);
 void copy_rpal(struct task_struct *p);
 #else
@@ -383,6 +429,37 @@ static inline void rpal_set_current_thread_flag(unsigned long bit) { }
 static inline void rpal_clear_current_thread_flag(unsigned long bit) { }
 static inline void exit_rpal(bool group_dead) { }
 static inline void copy_rpal(struct task_struct *p) { }
+static inline void rpal_set_cap(unsigned long cap) { }
+static inline void rpal_clear_cap(unsigned long cap) { }
+static inline bool rpal_has_cap(unsigned long cap) { return false; }
+#endif
+
+#ifdef CONFIG_RPAL_PKU
+static inline u32 rpal_pkey_to_pkru(int pkey)
+{
+	int offset = pkey * 2;
+	u32 mask = 0x3 << offset;
+
+	return ~(RPAL_PKRU_BASE_CODE & mask);
+}
+
+static inline u32 rpal_pkey_to_pkru_read(int pkey)
+{
+	int offset = pkey * 2;
+	u32 mask = 0x3 << offset;
+
+	return RPAL_PKRU_BASE_CODE_READ & ~mask;
+}
+
+static inline u32 rpal_pkru_union(u32 pkru0, u32 pkru1)
+{
+	return pkru0 & pkru1;
+}
+
+static inline u32 rpal_pkru_intersect(u32 pkru0, u32 pkru1)
+{
+	return pkru0 | pkru1;
+}
 #endif
 
 static inline unsigned long rpal_get_base(struct rpal_service *rs)
@@ -421,4 +498,6 @@ void rpal_resume_ep(struct task_struct *tsk);
 void rpal_ep_poll_nosched(struct rpal_receiver_data *rrd, struct pt_regs *regs);
 void rpal_remove_ep_wait_list(struct rpal_receiver_data *rrd);
 int rpal_ep_send_events(void *ep, struct rpal_receiver_epoll_context *rec);
+int do_rpal_mprotect_pkey(unsigned long start, size_t len, int pkey);
+void rpal_set_pku_schedule_tail(struct task_struct *prev);
 #endif /* _LINUX_RPAL_H_ */

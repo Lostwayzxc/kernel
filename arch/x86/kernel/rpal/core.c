@@ -345,6 +345,15 @@ rpal_skip_lazy_switch(struct task_struct *next, struct pt_regs *regs)
 	tgt = next->rpal_rs;
 	if (in_ret_section(tgt, regs->ip)) {
 		wrfsbase(current->thread.fsbase);
+#ifdef CONFIG_RPAL_PKU
+		if (rpal_pku_enabled() && rpal_current_service()->pku_on) {
+			rpal_set_current_pkru(
+				rpal_pkru_union(
+					rpal_pkey_to_pkru(rpal_current_service()->pkey),
+					rpal_pkey_to_pkru(next->rpal_rs->pkey)),
+				RPAL_PKRU_SET);
+		}
+#endif
 		rebuild_sender_stack(current->rpal_sd, regs);
 		rpal_clear_task_thread_flag(next, RPAL_LAZY_SWITCHED_BIT);
 		next->rpal_rd->sender = NULL;
@@ -361,8 +370,15 @@ static struct task_struct *rpal_fix_critical_section(struct task_struct *next,
 	if (rpal_test_task_thread_flag(next, RPAL_LAZY_SWITCHED_BIT))
 		next = rpal_skip_lazy_switch(next, regs);
 	/* !RPAL_LAZY_SWITCHED_BIT */
-	else if (rpal_is_correct_address(cur, regs->ip))
+	else if (rpal_is_correct_address(cur, regs->ip)) {
 		rpal_skip_receiver_code(next, regs);
+#ifdef CONFIG_RPAL_PKU
+		if (rpal_pku_enabled() && cur->pku_on)
+			write_pkru(rpal_pkru_union(
+				rpal_pkey_to_pkru(next->rpal_rs->pkey),
+				rdpkru()));
+	}
+#endif
 
 	return next;
 }
@@ -619,6 +635,13 @@ long rpal_ctl(unsigned long cmd, unsigned long arg0, unsigned long arg1)
 	case RPAL_CMD_GET_SERVICE_ID:
 		ret = (long)cur->id;
 		break;
+	case RPAL_CMD_GET_SERVICE_PKEY:
+#ifdef CONFIG_RPAL_PKU
+		ret = rpal_pku_enabled() ? cur->pkey : -1;
+#else
+		ret = -1;
+#endif
+		break;
 	default:
 		ret = -RPAL_ERR_BAD_ARG;
 		break;
@@ -630,6 +653,11 @@ static bool check_hardware_features(void)
 {
 	if (!boot_cpu_has(X86_FEATURE_FSGSBASE)) {
 		rpal_err("no fsgsbase feature\n");
+		return false;
+	}
+
+	if (!arch_pkeys_enabled()) {
+		rpal_err("MPK is not enabled\n");
 		return false;
 	}
 
@@ -656,6 +684,7 @@ int __init rpal_init(void)
 	if (ret)
 		goto thread_init_fail;
 
+	rpal_set_cap(RPAL_CAP_PKU);
 	rpal_inited = true;
 	return 0;
 

@@ -29,6 +29,7 @@
 #include <linux/uaccess.h>
 #include <linux/mm_inline.h>
 #include <linux/pgtable.h>
+#include <linux/rpal.h>
 #include <asm/cacheflush.h>
 #include <asm/mmu_context.h>
 #include <asm/tlbflush.h>
@@ -529,6 +530,18 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 	const bool rier = (current->personality & READ_IMPLIES_EXEC) &&
 				(prot & PROT_READ);
 
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled() && pkey != -1) {
+		struct rpal_service *cur = rpal_current_service();
+
+		if (unlikely(cur) && cur->pku_on) {
+			rpal_err("%s, pid: %d, try to change pkey\n", current->comm,
+				 current->pid);
+			return -EINVAL;
+		}
+	}
+#endif
+
 	start = untagged_addr(start);
 
 	prot &= ~(PROT_GROWSDOWN|PROT_GROWSUP);
@@ -656,6 +669,98 @@ out:
 	return error;
 }
 
+#ifdef CONFIG_RPAL_PKU
+int do_rpal_mprotect_pkey(unsigned long start, size_t len, int pkey)
+{
+	unsigned long nstart, end, tmp;
+	struct vm_area_struct *vma, *prev;
+	struct rpal_service *cur = rpal_current_service();
+	int error = -EINVAL;
+
+	start = untagged_addr(start);
+
+	if (start & ~PAGE_MASK)
+		return -EINVAL;
+	if (!len)
+		return 0;
+	len = PAGE_ALIGN(len);
+	end = start + len;
+	if (end <= start)
+		return -ENOMEM;
+
+	if (mmap_write_lock_killable(current->mm))
+		return -EINTR;
+
+	/*
+	 * If userspace did not allocate the pkey, do not let
+	 * them use it here.
+	 */
+	error = -EINVAL;
+	if ((pkey != -1) && !mm_pkey_is_allocated(current->mm, pkey))
+		goto out;
+
+restart:
+	vma = find_vma(current->mm, start);
+	error = -ENOMEM;
+	if (!vma)
+		goto out;
+	prev = vma->vm_prev;
+	if (vma->vm_start > start)
+		start = vma->vm_start;
+
+	if (start > vma->vm_start)
+		prev = vma;
+
+	for (nstart = start;;) {
+		unsigned long vma_pkey_mask;
+		unsigned long newflags;
+
+		/* Here we know that vma->vm_start <= nstart < vma->vm_end. */
+		vma_pkey_mask = VM_PKEY_BIT0 | VM_PKEY_BIT1 | VM_PKEY_BIT2 |
+				VM_PKEY_BIT3;
+		newflags = vma->vm_flags;
+		newflags &= ~vma_pkey_mask;
+		newflags |= ((unsigned long)cur->pkey) << VM_PKEY_SHIFT;
+
+		tmp = vma->vm_end;
+		if (tmp > end)
+			tmp = end;
+
+		if (vma->vm_ops && vma->vm_ops->mprotect) {
+			error = vma->vm_ops->mprotect(vma, nstart, tmp, newflags);
+			if (error)
+				goto out;
+		}
+
+		error = mprotect_fixup(vma, &prev, nstart, tmp, newflags);
+		if (error)
+			goto out;
+		nstart = tmp;
+
+		if (nstart < prev->vm_end)
+			nstart = prev->vm_end;
+		if (nstart >= end)
+			goto out;
+
+		vma = prev->vm_next;
+		if (!vma) {
+			error = -ENOMEM;
+			goto out;
+		}
+		if (vma->vm_start != nstart) {
+			start = vma->vm_start;
+			if (end <= start)
+				return -ENOMEM;
+			goto restart;
+		}
+	}
+out:
+	mmap_write_unlock(current->mm);
+	return error;
+}
+EXPORT_SYMBOL(do_rpal_mprotect_pkey);
+#endif
+
 SYSCALL_DEFINE3(mprotect, unsigned long, start, size_t, len,
 		unsigned long, prot)
 {
@@ -703,6 +808,13 @@ out:
 SYSCALL_DEFINE1(pkey_free, int, pkey)
 {
 	int ret;
+
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled() && rpal_current_service()) {
+		rpal_err("try_to_free pkey: %d %s\n", current->pid, current->comm);
+		return -EINVAL;
+	}
+#endif
 
 	mmap_write_lock(current->mm);
 	ret = mm_pkey_free(current->mm, pkey);

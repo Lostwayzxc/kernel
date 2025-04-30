@@ -1464,6 +1464,19 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			pkey = 0;
 	}
 
+#ifdef CONFIG_RPAL_PKU
+	/*
+	 * For RPAL process, if pku is enabled, we always use
+	 * its service pkey for new vma.
+	 */
+	if (rpal_pku_enabled()) {
+		struct rpal_service *cur = rpal_current_service();
+
+		if (cur && cur->pku_on)
+			pkey = cur->pkey;
+	}
+#endif
+
 	/* Do simple checking here so the lower-level routines won't have
 	 * to. we assume access permissions have been handled by the open
 	 * of the memory object, so we don't do any here.
@@ -3043,6 +3056,24 @@ static int do_brk_flags(unsigned long addr, unsigned long len, unsigned long fla
 	pgoff_t pgoff = addr >> PAGE_SHIFT;
 	int error;
 	unsigned long mapped_addr;
+
+#ifdef CONFIG_RPAL_PKU
+	if (rpal_pku_enabled()) {
+		/*
+		 * Any memory need to use RPAL service pkey
+		 * once service is enabled.
+		 */
+		struct rpal_service *cur = rpal_current_service();
+		unsigned long vma_pkey_mask;
+
+		if (cur && cur->pku_on) {
+			vma_pkey_mask = VM_PKEY_BIT0 | VM_PKEY_BIT1 | VM_PKEY_BIT2 |
+					VM_PKEY_BIT3;
+			flags &= ~vma_pkey_mask;
+			flags |= ((unsigned long)cur->pkey) << VM_PKEY_SHIFT;
+		}
+	}
+#endif
 
 	/* Until we need other flags, refuse anything except VM_EXEC. */
 	if ((flags & (~VM_EXEC)) != 0)
