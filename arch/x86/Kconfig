@@ -2973,3 +2973,5 @@ config HAVE_ATOMIC_IOMAP
 source "arch/x86/kvm/Kconfig"
 
 source "arch/x86/Kconfig.assembler"
+
+source "arch/x86/kernel/rpal/Kconfig"

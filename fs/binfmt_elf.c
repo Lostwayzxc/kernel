@@ -46,6 +46,7 @@
 #include <linux/cred.h>
 #include <linux/dax.h>
 #include <linux/uaccess.h>
+#include <linux/rpal.h>
 #include <asm/param.h>
 #include <asm/page.h>
 
@@ -820,6 +821,40 @@ static int parse_elf_properties(struct file *f, const struct elf_phdr *phdr,
 	return ret == -ENOENT ? 0 : ret;
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+static int rpal_create_service(char *e_ident, struct rpal_service **rs,
+			unsigned long *rpal_base, int *retval,
+			struct linux_binprm *bprm, int executable_stack)
+{
+	/*
+	 * The first 16 bytes of the elf binary is magic number, and the last
+	 * 7 bytes of that is reserved and ignored. We use the last 4 bytes
+	 * to indicate a rpal binary. If the last 4 bytes is "RPAL", then this
+	 * is a rpal binary and we need to do register routinue.
+	 */
+	if (memcmp(e_ident + RPAL_MAGIC_OFFSET, RPAL_MAGIC, RPAL_MAGIC_LEN) ==
+	    0) {
+		unsigned long rpal_stack_top = STACK_TOP;
+
+		*rs = rpal_alloc_and_register_service();
+		/*
+		 * RPAL process only has a contiguous 512GB address space, Whose base
+		 * address is given by its struct rpal_service. We need to rearrange
+		 * the user stack in this 512GB address space.
+		 */
+		*retval = setup_arg_pages(bprm,
+					  randomize_stack_top(rpal_stack_top),
+					  executable_stack);
+	} else {
+		*retval = setup_arg_pages(bprm, randomize_stack_top(STACK_TOP),
+					  executable_stack);
+	}
+
+out:
+	return 0;
+}
+#endif
+
 static int load_elf_binary(struct linux_binprm *bprm)
 {
 	struct file *interpreter = NULL; /* to shut gcc up */
@@ -842,6 +877,10 @@ static int load_elf_binary(struct linux_binprm *bprm)
 	struct arch_elf_state arch_state = INIT_ARCH_ELF_STATE;
 	struct mm_struct *mm;
 	struct pt_regs *regs;
+#if IS_ENABLED(CONFIG_RPAL)
+	struct rpal_service *rs = NULL;
+	unsigned long rpal_base;
+#endif
 
 	retval = -ENOEXEC;
 	/* First of all, some simple consistency checks */
@@ -1015,8 +1054,16 @@ out_free_interp:
 
 	/* Do this so that we can load the interpreter, if need be.  We will
 	   change some of these later */
+#if IS_ENABLED(CONFIG_RPAL)
+	/* call original function if fails */
+	if (rpal_create_service((char *)&elf_ex->e_ident, &rs, &rpal_base,
+				&retval, bprm, executable_stack))
+		retval = setup_arg_pages(bprm, randomize_stack_top(STACK_TOP),
+					 executable_stack);
+#else
 	retval = setup_arg_pages(bprm, randomize_stack_top(STACK_TOP),
 				 executable_stack);
+#endif
 	if (retval < 0)
 		goto out_free_dentry;
 	
@@ -1287,9 +1334,8 @@ out_free_interp:
 		 * growing down), and into the unused ELF_ET_DYN_BASE region.
 		 */
 		if (IS_ENABLED(CONFIG_ARCH_HAS_ELF_RANDOMIZE) &&
-		    elf_ex->e_type == ET_DYN && !interpreter) {
+		    elf_ex->e_type == ET_DYN && !interpreter)
 			mm->brk = mm->start_brk = ELF_ET_DYN_BASE;
-		}
 
 		mm->brk = mm->start_brk = arch_randomize_brk(mm);
 #ifdef compat_brk_randomized

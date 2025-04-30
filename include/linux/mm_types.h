@@ -586,6 +586,9 @@ struct mm_struct {
 #ifdef CONFIG_IOMMU_SVA
 		u32 pasid;
 #endif
+#if IS_ENABLED(CONFIG_RPAL)
+		struct rpal_service *rpal_rs;
+#endif
 	} __randomize_layout;
 
 	/*

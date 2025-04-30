@@ -1,0 +1,12 @@
+config RPAL
+	bool "Run Process As Library"
+	default n
+	depends on X86_64
+	help
+	  RPAL(Run Process As Library) allows process do context switch in
+	  userspace, thus improves IPC performance.
+
+	  Any program uses this feature need to enable this config, a correct
+	  version of rpal-lib is also needed. Say y if both of the conditions
+	  are satisfied. Otherwise, say N.
+

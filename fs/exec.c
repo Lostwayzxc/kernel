@@ -65,6 +65,7 @@
 #include <linux/vmalloc.h>
 #include <linux/io_uring.h>
 #include <linux/syscall_user_dispatch.h>
+#include <linux/rpal.h>
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -1163,6 +1164,16 @@ static int de_thread(struct task_struct *tsk)
 no_thread_group:
 	/* we have changed execution domain */
 	tsk->exit_signal = SIGCHLD;
+
+#if IS_ENABLED(CONFIG_RPAL)
+	/*
+	 * The rpal process is going to load another binary, we
+	 * need to unregister rpal since it is going to be another
+	 * process. Other threads have already exited by the time
+	 * we come here, we need to set group_dead as true.
+	 */
+	exit_rpal(true);
+#endif
 
 	BUG_ON(!thread_group_leader(tsk));
 	return 0;

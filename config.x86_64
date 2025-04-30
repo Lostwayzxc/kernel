@@ -682,6 +682,7 @@ CONFIG_KVM_AMD_SEV=y
 CONFIG_AS_AVX512=y
 CONFIG_AS_SHA1_NI=y
 CONFIG_AS_SHA256_NI=y
+CONFIG_RPAL=y
 
 #
 # General architecture-dependent options

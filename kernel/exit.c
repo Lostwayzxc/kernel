@@ -64,6 +64,7 @@
 #include <linux/compat.h>
 #include <linux/io_uring.h>
 #include <linux/sysfs.h>
+#include <linux/rpal.h>
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
@@ -854,6 +855,10 @@ void __noreturn do_exit(long code)
 
 	tsk->exit_code = code;
 	taskstats_exit(tsk, group_dead);
+
+#if IS_ENABLED(CONFIG_RPAL)
+	exit_rpal(group_dead);
+#endif
 
 	exit_mm();
 

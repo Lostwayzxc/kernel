@@ -59,6 +59,7 @@ struct rcu_node;
 struct reclaim_state;
 struct robust_list_head;
 struct root_domain;
+struct rpal_service;
 struct rq;
 struct sched_attr;
 struct sched_param;
@@ -733,6 +734,9 @@ struct task_struct {
 	unsigned int			saved_state;
 #endif
 
+#if IS_ENABLED(CONFIG_RPAL)
+	struct rpal_service *rpal_rs;
+#endif
 	/*
 	 * This begins the randomizable portion of task_struct. Only
 	 * scheduling-critical items should be added above here.

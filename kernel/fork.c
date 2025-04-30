@@ -97,6 +97,7 @@
 #include <linux/io_uring.h>
 #include <linux/bpf.h>
 #include <linux/sched/mm.h>
+#include <linux/rpal.h>
 
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
@@ -986,6 +987,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 #ifdef CONFIG_MEMCG
 	tsk->active_memcg = NULL;
 #endif
+#if IS_ENABLED(CONFIG_RPAL)
+	tsk->rpal_rs = NULL;
+#endif
+
 	return tsk;
 
 free_stack:
@@ -1045,6 +1050,9 @@ static void mm_init_uprobes_state(struct mm_struct *mm)
 static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	struct user_namespace *user_ns)
 {
+#if IS_ENABLED(CONFIG_RPAL)
+	mm->rpal_rs = NULL;
+#endif
 	mm->mmap = NULL;
 	mm->mm_rb = RB_ROOT;
 	mm->vmacache_seqnum = 0;
@@ -2406,6 +2414,16 @@ static __latent_entropy struct task_struct *copy_process(
 		} else {
 			current->signal->nr_threads++;
 			atomic_inc(&current->signal->live);
+#if IS_ENABLED(CONFIG_RPAL)
+			/*
+			 * For rpal process, the child thread needs to
+			 * inherit p->rpal_rs. Therefore, we can use
+			 * rpal_current_service() to get the struct
+			 * rpal_service for any thread of rpal process.
+			 */
+			copy_rpal(p);
+#endif
+
 			refcount_inc(&current->signal->sigcnt);
 			task_join_group_stop(p);
 			list_add_tail_rcu(&p->thread_group,
