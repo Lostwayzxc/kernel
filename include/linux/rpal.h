@@ -480,10 +480,13 @@ void rpal_unregister_service(struct rpal_service *rs);
 int rpal_balloon_init(unsigned long base);
 void rpal_exit_mmap(struct mm_struct *mm);
 bool rpal_is_correct_address(struct rpal_service *rs, unsigned long address);
+struct mm_struct *rpal_pf_get_real_mm(unsigned long address, int *rebuild);
 
 /* thread.c */
 int rpal_init_thread_pending(struct rpal_common_data *rcd);
 void rpal_free_thread_pending(struct rpal_common_data *rcd);
+int rpal_rebuild_sender_context_on_fault(struct pt_regs *regs,
+	unsigned long addr, int error_code);
 
 int rpal_get_epitemfd(wait_queue_entry_t *wait);
 void *rpal_get_epitemep(wait_queue_entry_t *wait);
@@ -500,4 +503,7 @@ void rpal_remove_ep_wait_list(struct rpal_receiver_data *rrd);
 int rpal_ep_send_events(void *ep, struct rpal_receiver_epoll_context *rec);
 int do_rpal_mprotect_pkey(unsigned long start, size_t len, int pkey);
 void rpal_set_pku_schedule_tail(struct task_struct *prev);
+void rpal_tlbbatch_add_mm(struct arch_tlbflush_unmap_batch *batch,
+	struct mm_struct *mm);
+bool should_skip_rpal_pages(unsigned long addr);
 #endif /* _LINUX_RPAL_H_ */

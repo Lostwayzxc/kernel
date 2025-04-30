@@ -207,6 +207,11 @@ struct flush_tlb_info {
 	unsigned int		initiating_cpu;
 	u8			stride_shift;
 	u8			freed_tables;
+#if IS_ENABLED(CONFIG_RPAL)
+	struct mm_struct **mm_list;
+	u64 *tlb_gen_list;
+	int nr_mm;
+#endif
 };
 
 void flush_tlb_local(void);

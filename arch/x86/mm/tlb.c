@@ -10,6 +10,8 @@
 #include <linux/debugfs.h>
 #include <linux/sched/smt.h>
 #include <linux/task_work.h>
+#include <linux/sched/mm.h>
+#include <linux/rpal.h>
 
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
@@ -895,6 +897,159 @@ STATIC_NOPV void native_flush_tlb_multi(const struct cpumask *cpumask,
 				(void *)info, 1, cpumask);
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+void rpal_flush_tlb_func_remote(void *info)
+{
+	struct mm_struct *loaded_mm = this_cpu_read(cpu_tlbstate.loaded_mm);
+	struct flush_tlb_info *f = info;
+	struct flush_tlb_info tf = *f;
+	int i;
+
+	/* As it comes from RPAL path, f->mm cannot be NULL */
+	if (f->mm == loaded_mm)
+		flush_tlb_func(f);
+
+	for (i = 0; i < f->nr_mm; i++) {
+		/* We always have f->mm_list[i] != NULL */
+		if (f->mm_list[i] == loaded_mm) {
+			tf.mm = f->mm_list[i];
+			tf.new_tlb_gen = f->tlb_gen_list[i];
+			flush_tlb_func(&tf);
+			return;
+		}
+	}
+}
+
+void rpal_flush_tlb_func_multi(const struct cpumask *cpumask,
+					 const struct flush_tlb_info *info)
+{
+	count_vm_tlb_event(NR_TLB_REMOTE_FLUSH);
+	if (info->end == TLB_FLUSH_ALL)
+		trace_tlb_flush(TLB_REMOTE_SEND_IPI, TLB_FLUSH_ALL);
+	else
+		trace_tlb_flush(TLB_REMOTE_SEND_IPI,
+				(info->end - info->start) >> PAGE_SHIFT);
+
+	if (info->freed_tables)
+		on_each_cpu_mask(cpumask, rpal_flush_tlb_func_remote, (void *)info, true);
+	else
+		on_each_cpu_cond_mask(tlb_is_not_lazy, rpal_flush_tlb_func_remote,
+				(void *)info, 1, cpumask);
+}
+
+static void rpal_flush_tlb_func_local(struct mm_struct *mm, int cpu,
+				      struct flush_tlb_info *info,
+				      u64 new_tlb_gen)
+{
+	struct mm_struct *loaded_mm = this_cpu_read(cpu_tlbstate.loaded_mm);
+
+	if (loaded_mm == info->mm) {
+		lockdep_assert_irqs_enabled();
+		local_irq_disable();
+		flush_tlb_func(info);
+		local_irq_enable();
+	} else {
+		int i;
+
+		for (i = 0; i < info->nr_mm; i++) {
+			if (info->mm_list[i] == loaded_mm) {
+				lockdep_assert_irqs_enabled();
+				local_irq_disable();
+				info->mm = info->mm_list[i];
+				info->new_tlb_gen = info->tlb_gen_list[i];
+				flush_tlb_func(info);
+				info->mm = mm;
+				info->new_tlb_gen = new_tlb_gen;
+				local_irq_enable();
+			}
+		}
+	}
+}
+
+void rpal_flush_tlb_mm_range(struct mm_struct *mm, int cpu,
+			     struct flush_tlb_info *info, u64 new_tlb_gen)
+{
+	struct rpal_service *cur = mm->rpal_rs;
+	cpumask_t merged_mask;
+	struct mm_struct *mm_list[MAX_REQUEST_SERVICE];
+	u64 tlb_gen_list[MAX_REQUEST_SERVICE];
+	int nr_mm = 0;
+	int i;
+
+	cpumask_copy(&merged_mask, mm_cpumask(mm));
+	if (cur) {
+		struct rpal_service *tgt;
+		struct mm_struct *tgt_mm;
+
+		rpal_for_each_mapped_service(cur, i) {
+			struct rpal_mapped_service *node;
+
+			if (i == cur->id)
+				continue;
+			node = rpal_get_mapped_node(cur, i);
+
+			tgt = rpal_get_service(node->rs);
+			if (!tgt)
+				continue;
+			tgt_mm = tgt->mm;
+			if (!mmget_not_zero(tgt_mm)) {
+				rpal_put_service(tgt);
+				continue;
+			}
+			mm_list[nr_mm] = tgt_mm;
+			tlb_gen_list[nr_mm] = inc_mm_tlb_gen(tgt_mm);
+
+			nr_mm++;
+			cpumask_or(&merged_mask, &merged_mask,
+				   mm_cpumask(tgt_mm));
+			rpal_put_service(tgt);
+		}
+		info->mm_list = mm_list;
+		info->tlb_gen_list = tlb_gen_list;
+		info->nr_mm = nr_mm;
+	}
+
+	rpal_flush_tlb_func_local(mm, cpu, info, new_tlb_gen);
+
+	if (cpumask_any_but(&merged_mask, cpu) < nr_cpu_ids)
+		rpal_flush_tlb_func_multi(&merged_mask, info);
+	for (i = 0; i < nr_mm; i++)
+		mmput_async(mm_list[i]);
+}
+
+void rpal_tlbbatch_add_mm(struct arch_tlbflush_unmap_batch *batch,
+			      struct mm_struct *mm)
+{
+	struct rpal_service *cur = mm->rpal_rs;
+	struct rpal_service *tgt;
+	struct mm_struct *tgt_mm;
+	int i;
+
+	rpal_for_each_mapped_service(cur, i) {
+		struct rpal_mapped_service *node;
+
+		if (i == cur->id)
+			continue;
+
+		node = rpal_get_mapped_node(cur, i);
+
+		tgt = rpal_get_service(node->rs);
+		if (!tgt)
+			continue;
+		tgt_mm = tgt->mm;
+		if (!mmget_not_zero(tgt_mm)) {
+			rpal_put_service(tgt);
+			continue;
+		}
+		inc_mm_tlb_gen(tgt_mm);
+		cpumask_or(&batch->cpumask, &batch->cpumask,
+			   mm_cpumask(tgt_mm));
+		rpal_put_service(tgt);
+		mmput_async(tgt_mm);
+	}
+}
+#endif
+
 void flush_tlb_multi(const struct cpumask *cpumask,
 		      const struct flush_tlb_info *info)
 {
@@ -942,7 +1097,11 @@ static struct flush_tlb_info *get_flush_tlb_info(struct mm_struct *mm,
 	info->freed_tables	= freed_tables;
 	info->new_tlb_gen	= new_tlb_gen;
 	info->initiating_cpu	= smp_processor_id();
-
+#if IS_ENABLED(CONFIG_RPAL)
+	info->mm_list = NULL;
+	info->tlb_gen_list = NULL;
+	info->nr_mm = 0;
+#endif
 	return info;
 }
 
@@ -978,6 +1137,11 @@ void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 	info = get_flush_tlb_info(mm, start, end, stride_shift, freed_tables,
 				  new_tlb_gen);
 
+#if IS_ENABLED(CONFIG_RPAL)
+	if (mm->rpal_rs)
+		rpal_flush_tlb_mm_range(mm, cpu, info, new_tlb_gen);
+	else {
+#endif
 	/*
 	 * flush_tlb_multi() is not optimized for the common case in which only
 	 * a local TLB flush is needed. Optimize this use-case by calling
@@ -991,7 +1155,9 @@ void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 		flush_tlb_func(info);
 		local_irq_enable();
 	}
-
+#if IS_ENABLED(CONFIG_RPAL)
+	}
+#endif
 	put_flush_tlb_info();
 	put_cpu();
 }

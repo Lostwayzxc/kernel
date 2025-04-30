@@ -19,6 +19,8 @@
 #include <linux/uaccess.h>		/* faulthandler_disabled()	*/
 #include <linux/efi.h>			/* efi_crash_gracefully_on_page_fault()*/
 #include <linux/mm_types.h>
+#include <linux/rpal.h>
+#include <linux/sched/mm.h>
 
 #include <asm/cpufeature.h>		/* boot_cpu_has, ...		*/
 #include <asm/traps.h>			/* dotraplinkage, ...		*/
@@ -1462,6 +1464,238 @@ trace_page_fault_entries(struct pt_regs *regs, unsigned long error_code,
 		trace_page_fault_kernel(address, regs, error_code);
 }
 
+#if IS_ENABLED(CONFIG_RPAL)
+static noinline void rpal_bad_area_access_error(struct pt_regs *regs,
+						unsigned long error_code,
+						unsigned long address,
+						struct vm_area_struct *vma,
+						struct mm_struct *real_mm)
+{
+	if (bad_area_access_from_pkeys(error_code, vma)) {
+		u32 pkey = vma_pkey(vma);
+
+		mmap_read_unlock(real_mm);
+		__bad_area_nosemaphore(regs, error_code, address, pkey,
+				       SEGV_PKUERR);
+	} else {
+		mmap_read_unlock(real_mm);
+		__bad_area_nosemaphore(regs, error_code, address, 0,
+				       SEGV_ACCERR);
+	}
+}
+
+static inline void rpal_try_to_rebuild_context(struct pt_regs *regs,
+					       unsigned long address,
+					       int error_code)
+{
+	int handle_more = 0;
+
+	handle_more = rpal_rebuild_sender_context_on_fault(regs, address, -1);
+	/*
+	 * For some case (i.e., Deepcopy), No magic number is set.
+	 * A user defined signal will be sent out to notify app.
+	 */
+	if (handle_more)
+		force_sig_fault(SIGSEGV, SEGV_MAPERR,
+				(void __user *)address);
+}
+
+void rpal_do_user_addr_fault(struct pt_regs *regs, unsigned long error_code,
+			     unsigned long address, struct mm_struct *real_mm)
+{
+	struct vm_area_struct *vma;
+	vm_fault_t fault;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+
+	if (unlikely(error_code & X86_PF_RSVD))
+		pgtable_bad(regs, error_code, address);
+
+	if (unlikely(cpu_feature_enabled(X86_FEATURE_SMAP) &&
+		     !(error_code & X86_PF_USER) &&
+		     !(regs->flags & X86_EFLAGS_AC))) {
+		/*
+		 * No extable entry here.  This was a kernel access to an
+		 * invalid pointer.  get_kernel_nofault() will not get here.
+		 */
+		page_fault_oops(regs, error_code, address);
+		return;
+	}
+
+	if (unlikely(faulthandler_disabled())) {
+		bad_area_nosemaphore(regs, error_code, address);
+		return;
+	}
+
+	if (user_mode(regs)) {
+		local_irq_enable();
+		flags |= FAULT_FLAG_USER;
+	} else {
+		if (regs->flags & X86_EFLAGS_IF)
+			local_irq_enable();
+	}
+
+	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);
+
+	if (error_code & X86_PF_WRITE)
+		flags |= FAULT_FLAG_WRITE;
+	if (error_code & X86_PF_INSTR)
+		flags |= FAULT_FLAG_INSTRUCTION;
+
+#ifdef CONFIG_X86_64
+	if (is_vsyscall_vaddr(address)) {
+		if (emulate_vsyscall(error_code, regs, address))
+			return;
+	}
+#endif
+	/*
+	 * Here we don't need to lock current->mm since no vma in
+	 * current->mm is used to handle this page fault. However,
+	 * we do need to lock real_mm, as the address belongs to
+	 * real_mm's vma.
+	 */
+	if (unlikely(!mmap_read_trylock(real_mm))) {
+		if (!user_mode(regs) && !search_exception_tables(regs->ip)) {
+			bad_area_nosemaphore(regs, error_code, address);
+			return;
+		}
+retry:
+		mmap_read_lock(real_mm);
+	} else {
+		might_sleep();
+	}
+
+	vma = find_vma(real_mm, address);
+	if (unlikely(!vma)) {
+		mmap_read_unlock(real_mm);
+		bad_area_nosemaphore(regs, error_code, address);
+		return;
+	}
+	if (likely(vma->vm_start <= address))
+		goto good_area;
+
+	if (unlikely(!(vma->vm_flags & VM_GROWSDOWN))) {
+		mmap_read_unlock(real_mm);
+		bad_area_nosemaphore(regs, error_code, address);
+		return;
+	}
+
+	if (unlikely(expand_stack(vma, address))) {
+		mmap_read_unlock(real_mm);
+		bad_area_nosemaphore(regs, error_code, address);
+		return;
+	}
+
+	/*
+	 * Ok, we have a good vm_area for this memory access, so
+	 * we can handle it..
+	 */
+good_area:
+	if (unlikely(access_error(error_code, vma))) {
+		rpal_bad_area_access_error(regs, error_code, address, vma,
+					   real_mm);
+		return;
+	}
+
+	fault = handle_mm_fault(vma, address, flags, regs);
+
+	if (fault_signal_pending(fault, regs))
+		return;
+
+	if (unlikely((fault & VM_FAULT_RETRY) &&
+		     (flags & FAULT_FLAG_ALLOW_RETRY))) {
+		flags |= FAULT_FLAG_TRIED;
+		goto retry;
+	}
+
+	mmap_read_unlock(real_mm);
+	if (likely(!(fault & VM_FAULT_ERROR)))
+		return;
+
+	if (fault & VM_FAULT_OOM) {
+		pagefault_out_of_memory();
+	} else {
+		if (fault & (VM_FAULT_SIGBUS | VM_FAULT_HWPOISON |
+			     VM_FAULT_HWPOISON_LARGE))
+			do_sigbus(regs, error_code, address, fault);
+		else if (fault & VM_FAULT_SIGSEGV)
+			bad_area_nosemaphore(regs, error_code, address);
+		else
+			BUG();
+	}
+}
+NOKPROBE_SYMBOL(rpal_do_user_addr_fault);
+
+bool rpal_try_user_addr_fault(struct pt_regs *regs, unsigned long error_code,
+			      unsigned long address)
+{
+	struct mm_struct *real_mm;
+	int rebuild = 0;
+
+	/* fast path: avoid mmget and mmput */
+	if (unlikely((error_code & (X86_PF_USER | X86_PF_INSTR)) ==
+		     X86_PF_INSTR)) {
+		/*
+		 * Whoops, this is kernel mode code trying to execute from
+		 * user memory.  Unless this is AMD erratum #93, which
+		 * corrupts RIP such that it looks like a user address,
+		 * this is unrecoverable.  Don't even try to look up the
+		 * VMA or look for extable entries.
+		 */
+		if (is_errata93(regs, address))
+			return true;
+
+		page_fault_oops(regs, error_code, address);
+		return true;
+	}
+	/* kprobes don't want to hook the spurious faults: */
+	if (unlikely(kprobe_page_fault(regs, X86_TRAP_PF)))
+		return true;
+
+	real_mm = rpal_pf_get_real_mm(address, &rebuild);
+
+	if (real_mm) {
+		struct mem_cgroup *memcg = NULL;
+
+		prefetchw(&real_mm->mmap_lock);
+		if (!current->active_memcg) {
+			memcg = get_mem_cgroup_from_mm(real_mm);
+			if (memcg)
+				set_active_memcg(memcg);
+		}
+		rpal_do_user_addr_fault(regs, error_code, address, real_mm);
+		if (memcg) {
+			set_active_memcg(NULL);
+			mem_cgroup_put(memcg);
+		}
+		mmput_async(real_mm);
+		return true;
+	} else if (user_mode(regs) && rebuild) {
+		rpal_try_to_rebuild_context(regs, address, -1);
+		return true;
+	}
+
+	return false;
+}
+
+int rpal_handle_page_fault(struct pt_regs *regs, unsigned long error_code, unsigned long address)
+{
+	struct rpal_service *cur = rpal_current_service();
+
+	/*
+	 * For RPAL process, it may access another process's memory and
+	 * there may be page fault. We handle this case with our own routine.
+	 * If we cannot handle this page fault, just let it go and handle
+	 * it as a normal page fault.
+	 */
+	if (cur && !rpal_is_correct_address(cur, address)) {
+		if (rpal_try_user_addr_fault(regs, error_code, address))
+			return 1;
+	}
+	/* fallthrough; */
+	return 0;
+}
+#endif
+
 static __always_inline void
 handle_page_fault(struct pt_regs *regs, unsigned long error_code,
 			      unsigned long address)
@@ -1475,7 +1709,16 @@ handle_page_fault(struct pt_regs *regs, unsigned long error_code,
 	if (unlikely(fault_in_kernel_space(address))) {
 		do_kern_addr_fault(regs, error_code, address);
 	} else {
+#if IS_ENABLED(CONFIG_RPAL)
+		if (rpal_handle_page_fault(regs, error_code, address)) {
+			local_irq_disable();
+			return;
+		}
+		/* fallthrough; */
 		do_user_addr_fault(regs, error_code, address);
+#else /* !CONFIG_RPAL */
+		do_user_addr_fault(regs, error_code, address);
+#endif
 		/*
 		 * User address page fault handling might have reenabled
 		 * interrupts. Fixing up all potential exit points of

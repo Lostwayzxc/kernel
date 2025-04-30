@@ -73,6 +73,7 @@
 #include <linux/page_idle.h>
 #include <linux/memremap.h>
 #include <linux/userfaultfd_k.h>
+#include <linux/rpal.h>
 
 #include <asm/tlbflush.h>
 
@@ -629,6 +630,10 @@ static void set_tlb_ubc_flush_pending(struct mm_struct *mm, bool writable)
 	struct tlbflush_unmap_batch *tlb_ubc = &current->tlb_ubc;
 
 	arch_tlbbatch_add_mm(&tlb_ubc->arch, mm);
+#if IS_ENABLED(CONFIG_RPAL)
+	if (mm->rpal_rs)
+		rpal_tlbbatch_add_mm(&tlb_ubc->arch, mm);
+#endif
 	tlb_ubc->flush_required = true;
 
 	/*

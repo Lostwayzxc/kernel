@@ -73,6 +73,7 @@
 #include <linux/perf_event.h>
 #include <linux/ptrace.h>
 #include <linux/vmalloc.h>
+#include <linux/rpal.h>
 
 #include <trace/events/kmem.h>
 
@@ -4414,6 +4415,18 @@ static vm_fault_t do_numa_page(struct vm_fault *vmf)
 	/* TODO: handle PTE-mapped THP */
 	if (PageCompound(page))
 		goto out_map;
+
+#if IS_ENABLED(CONFIG_RPAL)
+	/*
+	 * For rpal process, if the fault address it belong to current process,
+	 * we skip numa page handing.
+	 *
+	 * For receiver thread, we do not let it do numa page handling, this is
+	 * out of consideration of performance.
+	 */
+	if (rpal_current_service() && should_skip_rpal_pages(vmf->address))
+		goto out_map;
+#endif
 
 	/*
 	 * Avoid grouping on RO pages in general. RO pages shouldn't hurt as

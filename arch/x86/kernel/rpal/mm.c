@@ -411,3 +411,46 @@ void rpal_exit_mmap(struct mm_struct *mm)
 		rpal_put_service(rs);
 	}
 }
+
+static inline bool check_service_mapped(struct rpal_service *cur, int tgt_id)
+{
+	struct rpal_mapped_service *node;
+	bool is_mapped = true;
+	unsigned long flags = RPAL_REVERSE_MAP | RPAL_REQUEST_MAP;
+
+	node = rpal_get_mapped_node(cur, tgt_id);
+	if (unlikely((node->type & flags) != flags))
+		is_mapped = false;
+
+	return is_mapped;
+}
+
+struct mm_struct *rpal_pf_get_real_mm(unsigned long address, int *rebuild)
+{
+	struct rpal_service *cur, *tgt;
+	struct mm_struct *mm = NULL;
+
+	cur = rpal_current_service();
+
+	tgt = rpal_get_mapped_service_by_addr(cur, address);
+	if (tgt == NULL)
+		goto out;
+
+	mm = tgt->mm;
+	if (unlikely(!check_service_mapped(cur, tgt->id) || !mmget_not_zero(mm)))
+		mm = NULL;
+	*rebuild = 1;
+	rpal_put_service(tgt);
+out:
+	return mm;
+}
+
+bool should_skip_rpal_pages(unsigned long addr)
+{
+	struct rpal_service *cur = rpal_current_service();
+
+	if (!rpal_is_correct_address(cur, addr))
+		return true;
+
+	return false;
+}
