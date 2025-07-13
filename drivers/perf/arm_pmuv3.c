@@ -560,15 +560,8 @@ static void armv8pmu_write_counter(struct perf_event *event, u64 value)
 static void armv8pmu_write_evtype(int idx, u32 val)
 {
 	u32 counter = ARMV8_IDX_TO_COUNTER(idx);
-	unsigned long mask = ARMV8_PMU_EVTYPE_EVENT |
-			     ARMV8_PMU_INCLUDE_EL2 |
-			     ARMV8_PMU_EXCLUDE_EL0 |
-			     ARMV8_PMU_EXCLUDE_EL1;
 
-	if (IS_ENABLED(CONFIG_ARM64))
-		mask |= ARMV8_PMU_EVTYPE_TC | ARMV8_PMU_EVTYPE_TH;
-
-	val &= mask;
+	val &= ARMV8_PMU_EVTYPE_MASK;
 	write_pmevtypern(counter, val);
 }
 
