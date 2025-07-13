@@ -289,31 +289,20 @@ static const struct attribute_group armv8_pmuv3_events_attr_group = {
 	.is_visible = armv8pmu_event_attr_is_visible,
 };
 
-/* User ABI */
-#define ATTR_CFG_FLD_event_CFG		config
-#define ATTR_CFG_FLD_event_LO		0
-#define ATTR_CFG_FLD_event_HI		15
-#define ATTR_CFG_FLD_long_CFG		config1
-#define ATTR_CFG_FLD_long_LO		0
-#define ATTR_CFG_FLD_long_HI		0
-#define ATTR_CFG_FLD_rdpmc_CFG		config1
-#define ATTR_CFG_FLD_rdpmc_LO		1
-#define ATTR_CFG_FLD_rdpmc_HI		1
-
-GEN_PMU_FORMAT_ATTR(event);
-GEN_PMU_FORMAT_ATTR(long);
-GEN_PMU_FORMAT_ATTR(rdpmc);
+PMU_FORMAT_ATTR(event, "config:0-15");
+PMU_FORMAT_ATTR(long, "config1:0");
+PMU_FORMAT_ATTR(rdpmc, "config1:1");
 
 static int sysctl_perf_user_access __read_mostly;
 
 static bool armv8pmu_event_is_64bit(struct perf_event *event)
 {
-	return ATTR_CFG_GET_FLD(&event->attr, long);
+	return event->attr.config1 & 0x1;
 }
 
 static bool armv8pmu_event_want_user_access(struct perf_event *event)
 {
-	return ATTR_CFG_GET_FLD(&event->attr, rdpmc);
+	return event->attr.config1 & 0x2;
 }
 
 static struct attribute *armv8_pmuv3_format_attrs[] = {
