@@ -229,6 +229,7 @@ static int hisi_iostat_add_events(struct evlist *evl)
 {
 	struct hisi_pcie_root_port *rp;
 	struct evsel *evsel;
+	struct parse_events_error err;
 	unsigned int i, j;
 	char *iostat_cmd;
 	int pos = 0;
@@ -257,7 +258,7 @@ static int hisi_iostat_add_events(struct evlist *evl)
 				iostat_cmd[pos++] = ',';
 		}
 
-		ret = parse_event(evl, iostat_cmd);
+		ret = parse_events(evl, iostat_cmd, &err);
 		if (ret)
 			break;
 
@@ -430,7 +431,7 @@ void iostat_prefix(struct evlist *evlist, struct perf_stat_config *config,
 
 void iostat_print_counters(struct evlist *evlist, struct perf_stat_config *config,
 			   struct timespec *ts, char *prefix,
-			   iostat_print_counter_t print_cnt_cb, void *arg)
+			   iostat_print_counter_t print_cnt_cb)
 {
 	struct evsel *counter = evlist__first(evlist);
 	void *perf_device;
@@ -445,7 +446,7 @@ void iostat_print_counters(struct evlist *evlist, struct perf_stat_config *confi
 			iostat_prefix(evlist, config, prefix, ts);
 			fprintf(config->output, "\n%s", prefix);
 		}
-		print_cnt_cb(config, counter, arg);
+		print_cnt_cb(config, counter, prefix);
 	}
 	fputc('\n', config->output);
 }
