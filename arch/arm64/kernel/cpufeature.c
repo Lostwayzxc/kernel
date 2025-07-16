@@ -85,6 +85,7 @@
 #include <asm/kvm_host.h>
 #include <asm/mmu_context.h>
 #include <asm/mte.h>
+#include <asm/nmi.h>
 #include <asm/processor.h>
 #include <asm/smp.h>
 #include <asm/sysreg.h>
@@ -255,6 +256,7 @@ static const struct arm64_ftr_bits ftr_id_aa64pfr0[] = {
 };
 
 static const struct arm64_ftr_bits ftr_id_aa64pfr1[] = {
+	ARM64_FTR_BITS(FTR_HIDDEN, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64PFR1_EL1_NMI_SHIFT, 4, 0),
 	ARM64_FTR_BITS(FTR_VISIBLE_IF_IS_ENABLED(CONFIG_ARM64_SME),
 		       FTR_STRICT, FTR_LOWER_SAFE, ID_AA64PFR1_EL1_SME_SHIFT, 4, 0),
 	ARM64_FTR_BITS(FTR_HIDDEN, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64PFR1_EL1_MPAM_frac_SHIFT, 4, 0),
@@ -1629,6 +1631,9 @@ has_useable_cnp(const struct arm64_cpu_capabilities *entry, int scope)
 	if (is_kdump_kernel())
 		return false;
 
+	if (cpus_have_cap(ARM64_WORKAROUND_HISILICON_ERRATUM_162100125))
+		return false;
+
 	if (cpus_have_cap(ARM64_WORKAROUND_NVIDIA_CARMEL_CNP))
 		return false;
 
@@ -2158,9 +2163,11 @@ static void cpu_enable_e0pd(struct arm64_cpu_capabilities const *cap)
 }
 #endif /* CONFIG_ARM64_E0PD */
 
-#ifdef CONFIG_ARM64_PSEUDO_NMI
+#if IS_ENABLED(CONFIG_ARM64_PSEUDO_NMI) || IS_ENABLED(CONFIG_ARM64_NMI)
 static bool enable_pseudo_nmi;
+#endif
 
+#ifdef CONFIG_ARM64_PSEUDO_NMI
 static int __init early_enable_pseudo_nmi(char *p)
 {
 	return kstrtobool(p, &enable_pseudo_nmi);
@@ -2207,6 +2214,46 @@ static bool has_gic_prio_relaxed_sync(const struct arm64_cpu_capabilities *entry
 	 * (and we can't change it).
 	 */
 	return (gic_read_ctlr() & ICC_CTLR_EL1_PMHE_MASK) == 0;
+}
+#endif
+
+static bool use_nmi(const struct arm64_cpu_capabilities *entry, int scope)
+{
+	if (!has_cpuid_feature(entry, scope))
+		return false;
+
+	/*
+	 * NMI support was not enabled in the kernel, but can still be
+	 * used by guests. Let the world know.
+	 *
+	 * Having both real and pseudo NMIs enabled simultaneously is
+	 * likely to cause confusion.  Since pseudo NMIs must be
+	 * enabled with an explicit command line option, if the user
+	 * has set that option on a system with real NMIs for some
+	 * reason assume they know what they're doing.
+	 */
+	if (!IS_ENABLED(CONFIG_ARM64_NMI))
+		pr_info("CONFIG_ARM64_NMI disabled, using NMIs for guests only\n");
+	else if (IS_ENABLED(CONFIG_ARM64_PSEUDO_NMI) && enable_pseudo_nmi) {
+		pr_info("Pseudo NMI enabled, not using architected NMI\n");
+		return false;
+	}
+
+	return true;
+}
+
+#ifdef CONFIG_ARM64_NMI
+static void nmi_enable(const struct arm64_cpu_capabilities *__unused)
+{
+	/*
+	 * Enable use of NMIs controlled by ALLINT, SPINTMASK should
+	 * be clear by default but make it explicit that we are using
+	 * this mode.  Ensure that ALLINT is clear first in order to
+	 * avoid leaving things masked.
+	 */
+	_allint_clear();
+	sysreg_clear_set(sctlr_el1, SCTLR_EL1_SPINTMASK, SCTLR_EL1_NMI);
+	isb();
 }
 #endif
 
@@ -2543,6 +2590,21 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
 		ARM64_CPUID_FIELDS(ID_AA64MMFR1_EL1, HAFDBS, DBM)
 	},
 #endif
+#ifdef CONFIG_ARM64_HAFT
+	{
+		.desc = "Hardware managed Access Flag for Table Descriptors",
+		/*
+		 * Contrary to the page/block access flag, the table access flag
+		 * cannot be emulated in software (no access fault will occur).
+		 * Therefore this should be used only if it's supported system
+		 * wide.
+		 */
+		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
+		.capability = ARM64_HAFT,
+		.matches = has_cpuid_feature,
+		ARM64_CPUID_FIELDS(ID_AA64MMFR1_EL1, HAFDBS, HAFT)
+	},
+#endif
 	{
 		.desc = "CRC32 instructions",
 		.capability = ARM64_HAS_CRC32,
@@ -2799,6 +2861,40 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
 		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
 		.matches = has_lpa2,
 	},
+	{
+		.desc = "Non-maskable Interrupts present",
+		.capability = ARM64_HAS_NMI,
+		.type = ARM64_CPUCAP_BOOT_CPU_FEATURE,
+		.sys_reg = SYS_ID_AA64PFR1_EL1,
+		.sign = FTR_UNSIGNED,
+		.field_pos = ID_AA64PFR1_EL1_NMI_SHIFT,
+		.field_width = 4,
+		.min_field_value = ID_AA64PFR1_EL1_NMI_IMP,
+		.matches = has_cpuid_feature,
+	},
+	{
+		.desc = "Non-maskable Interrupts enabled",
+		.capability = ARM64_USES_NMI,
+		.type = ARM64_CPUCAP_BOOT_CPU_FEATURE,
+		.sys_reg = SYS_ID_AA64PFR1_EL1,
+		.sign = FTR_UNSIGNED,
+		.field_pos = ID_AA64PFR1_EL1_NMI_SHIFT,
+		.field_width = 4,
+		.min_field_value = ID_AA64PFR1_EL1_NMI_IMP,
+		.matches = use_nmi,
+#ifdef CONFIG_ARM64_NMI
+		.cpu_enable = nmi_enable,
+#endif
+	},
+#ifdef CONFIG_ARM64_TWED
+	{
+		.desc = "Delayed Trapping of WFE",
+		.capability = ARM64_HAS_TWED,
+		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
+		.matches = has_cpuid_feature,
+		ARM64_CPUID_FIELDS(ID_AA64MMFR1_EL1, TWED, IMP)
+	},
+#endif
 	{},
 };
 

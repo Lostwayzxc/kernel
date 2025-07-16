@@ -106,6 +106,9 @@ KVM_NVHE_ALIAS(__hyp_rodata_end);
 /* pKVM static key */
 KVM_NVHE_ALIAS(kvm_protected_mode_initialized);
 
+/* Capability of non-cacheable snooping */
+KVM_NVHE_ALIAS(kvm_ncsnp_support);
+
 #endif /* CONFIG_KVM */
 
 #ifdef CONFIG_EFI_ZBOOT

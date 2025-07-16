@@ -32,6 +32,12 @@ struct gic_kvm_info {
 	bool		has_v4;
 	/* rvpeid support */
 	bool		has_v4_1;
+	/* NMI support */
+	bool            has_nmi;
+#ifdef CONFIG_VIRT_VTIMER_IRQ_BYPASS
+	/* vtimer irqbypass support */
+	bool            has_vtimer;
+#endif
 	/* Deactivation impared, subpar stuff */
 	bool		no_hw_deactivation;
 };
@@ -41,5 +47,7 @@ void vgic_set_kvm_info(const struct gic_kvm_info *info);
 #else
 static inline void vgic_set_kvm_info(const struct gic_kvm_info *info) {}
 #endif
+
+extern struct static_key_false ipiv_enable;
 
 #endif

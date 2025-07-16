@@ -729,6 +729,20 @@ static __always_inline bool system_supports_fpsimd(void)
 	return alternative_has_cap_likely(ARM64_HAS_FPSIMD);
 }
 
+#ifdef CONFIG_ARM64_HDBSS
+static inline bool system_supports_hdbss(void)
+{
+	u64 mmfr1;
+	u32 val;
+
+	mmfr1 =	read_sanitised_ftr_reg(SYS_ID_AA64MMFR1_EL1);
+	val = cpuid_feature_extract_unsigned_field(mmfr1,
+						ID_AA64MMFR1_EL1_HAFDBS_SHIFT);
+
+	return val == ID_AA64MMFR1_EL1_HAFDBS_HDBSS;
+}
+#endif
+
 static inline bool system_uses_hw_pan(void)
 {
 	return alternative_has_cap_unlikely(ARM64_HAS_PAN);
@@ -790,6 +804,12 @@ static __always_inline bool system_uses_irq_prio_masking(void)
 	return alternative_has_cap_unlikely(ARM64_HAS_GIC_PRIO_MASKING);
 }
 
+static __always_inline bool system_uses_nmi(void)
+{
+	return cpus_have_cap(ARM64_USES_NMI) &&
+		!system_uses_irq_prio_masking();
+}
+
 static inline bool system_supports_mte(void)
 {
 	return alternative_has_cap_unlikely(ARM64_MTE);
@@ -820,6 +840,12 @@ static inline bool system_supports_tlb_range(void)
 static inline bool system_supports_lpa2(void)
 {
 	return cpus_have_final_cap(ARM64_HAS_LPA2);
+}
+
+static inline bool system_supports_haft(void)
+{
+	return IS_ENABLED(CONFIG_ARM64_HAFT) &&
+		cpus_have_final_cap(ARM64_HAFT);
 }
 
 int do_emulate_mrs(struct pt_regs *regs, u32 sys_reg, u32 rt);
