@@ -284,7 +284,14 @@ bool topology_is_primary_thread(unsigned int cpu)
 {
 	return apic_id_is_primary_thread(per_cpu(x86_cpu_to_apicid, cpu));
 }
-#define topology_is_primary_thread topology_is_primary_thread
+
+/**
+ * topology_smt_supported - Check whether SMT is supported by the CPUs
+ */
+bool topology_smt_supported(void)
+{
+	return smp_num_siblings > 1;
+}
 
 /**
  * topology_phys_to_logical_pkg - Map a physical package id to a logical

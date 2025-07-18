@@ -489,9 +489,10 @@ static ssize_t docked_show(struct device *dev,
 			   struct device_attribute *attr, char *buf)
 {
 	struct dock_station *dock_station = dev->platform_data;
-	struct acpi_device *adev = acpi_fetch_acpi_dev(dock_station->handle);
+	struct acpi_device *adev = NULL;
 
-	return sysfs_emit(buf, "%u\n", acpi_device_enumerated(adev));
+	acpi_bus_get_device(dock_station->handle, &adev);
+	return snprintf(buf, PAGE_SIZE, "%u\n", acpi_device_enumerated(adev));
 }
 static DEVICE_ATTR_RO(docked);
 

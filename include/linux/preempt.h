@@ -8,7 +8,6 @@
  */
 
 #include <linux/linkage.h>
-#include <linux/cleanup.h>
 #include <linux/list.h>
 
 /*
@@ -431,9 +430,5 @@ static inline void migrate_disable(void) { }
 static inline void migrate_enable(void) { }
 
 #endif /* CONFIG_SMP */
-
-DEFINE_LOCK_GUARD_0(preempt, preempt_disable(), preempt_enable())
-DEFINE_LOCK_GUARD_0(preempt_notrace, preempt_disable_notrace(), preempt_enable_notrace())
-DEFINE_LOCK_GUARD_0(migrate, migrate_disable(), migrate_enable())
 
 #endif /* __LINUX_PREEMPT_H */

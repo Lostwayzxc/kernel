@@ -710,7 +710,7 @@ out_platform_registered:
 	return ret;
 }
 
-static void acpi_remove(struct acpi_device *device)
+static int acpi_remove(struct acpi_device *device)
 {
 	sysfs_remove_group(&pf_device->dev.kobj, &dev_attribute_group);
 
@@ -721,6 +721,8 @@ static void acpi_remove(struct acpi_device *device)
 	platform_device_unregister(pf_device);
 	pf_device = NULL;
 	platform_driver_unregister(&pf_driver);
+
+	return 0;
 }
 
 static const struct acpi_device_id device_ids[] = {

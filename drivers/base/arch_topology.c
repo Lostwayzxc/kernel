@@ -16,7 +16,6 @@
 #include <linux/sched/topology.h>
 #include <linux/cpuset.h>
 #include <linux/cpumask.h>
-#include <linux/cpu_smt.h>
 #include <linux/init.h>
 #include <linux/percpu.h>
 #include <linux/rcupdate.h>
@@ -391,10 +390,6 @@ core_initcall(free_raw_capacity);
 #endif
 
 #if defined(CONFIG_ARM64) || defined(CONFIG_RISCV)
-
-/* Used to enable the SMT control */
-static unsigned int max_smt_thread_num = 1;
-
 /*
  * This function returns the logic cpu number of the node.
  * There are basically three kinds of return values:
@@ -437,25 +432,22 @@ static int __init parse_core(struct device_node *core, int package_id,
 	do {
 		snprintf(name, sizeof(name), "thread%d", i);
 		t = of_get_child_by_name(core, name);
-		if (!t)
-			break;
-
-		leaf = false;
-		cpu = get_cpu_for_node(t);
-		if (cpu >= 0) {
-			cpu_topology[cpu].package_id = package_id;
-			cpu_topology[cpu].core_id = core_id;
-			cpu_topology[cpu].thread_id = i;
-		} else if (cpu != -ENODEV) {
-			pr_err("%pOF: Can't get CPU for thread\n", t);
+		if (t) {
+			leaf = false;
+			cpu = get_cpu_for_node(t);
+			if (cpu >= 0) {
+				cpu_topology[cpu].package_id = package_id;
+				cpu_topology[cpu].core_id = core_id;
+				cpu_topology[cpu].thread_id = i;
+			} else if (cpu != -ENODEV) {
+				pr_err("%pOF: Can't get CPU for thread\n", t);
+				of_node_put(t);
+				return -EINVAL;
+			}
 			of_node_put(t);
-			return -EINVAL;
 		}
-		of_node_put(t);
 		i++;
-	} while (1);
-
-	max_smt_thread_num = max_t(unsigned int, max_smt_thread_num, i);
+	} while (t);
 
 	cpu = get_cpu_for_node(core);
 	if (cpu >= 0) {
@@ -475,12 +467,13 @@ static int __init parse_core(struct device_node *core, int package_id,
 	return 0;
 }
 
-static int __init parse_cluster(struct device_node *cluster, int package_id, int depth)
+static int __init parse_cluster(struct device_node *cluster, int depth)
 {
 	char name[20];
 	bool leaf = true;
 	bool has_cores = false;
 	struct device_node *c;
+	static int package_id __initdata;
 	int core_id = 0;
 	int i, ret;
 
@@ -493,90 +486,53 @@ static int __init parse_cluster(struct device_node *cluster, int package_id, int
 	do {
 		snprintf(name, sizeof(name), "cluster%d", i);
 		c = of_get_child_by_name(cluster, name);
-		if (!c)
-			break;
-
-		leaf = false;
-		ret = parse_cluster(c, package_id, depth + 1);
-		of_node_put(c);
-		if (ret != 0)
-			return ret;
+		if (c) {
+			leaf = false;
+			ret = parse_cluster(c, depth + 1);
+			of_node_put(c);
+			if (ret != 0)
+				return ret;
+		}
 		i++;
-	} while (1);
+	} while (c);
 
 	/* Now check for cores */
 	i = 0;
 	do {
 		snprintf(name, sizeof(name), "core%d", i);
 		c = of_get_child_by_name(cluster, name);
-		if (!c)
-			break;
+		if (c) {
+			has_cores = true;
 
-		has_cores = true;
+			if (depth == 0) {
+				pr_err("%pOF: cpu-map children should be clusters\n",
+				       c);
+				of_node_put(c);
+				return -EINVAL;
+			}
 
-		if (depth == 0) {
-			pr_err("%pOF: cpu-map children should be clusters\n", c);
+			if (leaf) {
+				ret = parse_core(c, package_id, core_id++);
+			} else {
+				pr_err("%pOF: Non-leaf cluster with core %s\n",
+				       cluster, name);
+				ret = -EINVAL;
+			}
+
 			of_node_put(c);
-			return -EINVAL;
+			if (ret != 0)
+				return ret;
 		}
-
-		if (leaf) {
-			ret = parse_core(c, package_id, core_id++);
-		} else {
-			pr_err("%pOF: Non-leaf cluster with core %s\n",
-			       cluster, name);
-			ret = -EINVAL;
-		}
-
-		of_node_put(c);
-		if (ret != 0)
-			return ret;
 		i++;
-	} while (1);
+	} while (c);
 
 	if (leaf && !has_cores)
 		pr_warn("%pOF: empty cluster\n", cluster);
 
-	return 0;
-}
-
-static int __init parse_socket(struct device_node *socket)
-{
-	char name[20];
-	struct device_node *c;
-	bool has_socket = false;
-	int package_id = 0, ret;
-
-	do {
-		snprintf(name, sizeof(name), "socket%d", package_id);
-		c = of_get_child_by_name(socket, name);
-		if (!c)
-			break;
-
-		has_socket = true;
-		ret = parse_cluster(c, package_id, 0);
-		of_node_put(c);
-		if (ret != 0)
-			return ret;
-
+	if (leaf)
 		package_id++;
-	} while (1);
 
-	if (!has_socket)
-		ret = parse_cluster(socket, 0, 0);
-
-	/*
-	 * Reset the max_smt_thread_num to 1 on failure. Since on failure
-	 * we need to notify the framework the SMT is not supported, but
-	 * max_smt_thread_num can be initialized to the SMT thread number
-	 * of the cores which are successfully parsed.
-	 */
-	if (ret)
-		max_smt_thread_num = 1;
-
-	cpu_smt_set_num_threads(max_smt_thread_num, max_smt_thread_num);
-
-	return ret;
+	return 0;
 }
 
 static int __init parse_dt_topology(void)
@@ -599,7 +555,7 @@ static int __init parse_dt_topology(void)
 	if (!map)
 		goto out;
 
-	ret = parse_socket(map);
+	ret = parse_cluster(map, 0);
 	if (ret != 0)
 		goto out_map;
 

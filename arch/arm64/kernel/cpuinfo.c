@@ -97,7 +97,6 @@ static const char *const hwcap_str[] = {
 	[KERNEL_HWCAP_ECV]		= "ecv",
 	[KERNEL_HWCAP_AFP]		= "afp",
 	[KERNEL_HWCAP_RPRES]		= "rpres",
-	[KERNEL_HWCAP_HBC]		= "hbc",
 };
 
 #ifdef CONFIG_COMPAT

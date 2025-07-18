@@ -101,9 +101,10 @@ static int ptp_vmw_acpi_add(struct acpi_device *device)
 	return 0;
 }
 
-static void ptp_vmw_acpi_remove(struct acpi_device *device)
+static int ptp_vmw_acpi_remove(struct acpi_device *device)
 {
 	ptp_clock_unregister(ptp_vmw_clock);
+	return 0;
 }
 
 static const struct acpi_device_id ptp_vmw_acpi_device_ids[] = {
