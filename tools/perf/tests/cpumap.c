@@ -38,7 +38,7 @@ static int process_event_mask(struct perf_tool *tool __maybe_unused,
 	TEST_ASSERT_VAL("wrong nr",  map->nr == 20);
 
 	for (i = 0; i < 20; i++) {
-		TEST_ASSERT_VAL("wrong cpu", map->map[i] == i);
+		TEST_ASSERT_VAL("wrong cpu", map->map[i].cpu == i);
 	}
 
 	perf_cpu_map__put(map);
@@ -67,8 +67,8 @@ static int process_event_cpus(struct perf_tool *tool __maybe_unused,
 
 	map = cpu_map__new_data(data);
 	TEST_ASSERT_VAL("wrong nr",  map->nr == 2);
-	TEST_ASSERT_VAL("wrong cpu", map->map[0] == 1);
-	TEST_ASSERT_VAL("wrong cpu", map->map[1] == 256);
+	TEST_ASSERT_VAL("wrong cpu", map->map[0].cpu == 1);
+	TEST_ASSERT_VAL("wrong cpu", map->map[1].cpu == 256);
 	TEST_ASSERT_VAL("wrong refcnt", refcount_read(&map->refcnt) == 1);
 	perf_cpu_map__put(map);
 	return 0;
@@ -137,3 +137,43 @@ int test__cpu_map_merge(struct test *test __maybe_unused, int subtest __maybe_un
 	perf_cpu_map__put(c);
 	return 0;
 }
+
+static int __test__cpu_map_intersect(const char *lhs, const char *rhs, int nr, const char *expected)
+{
+	struct perf_cpu_map *a = perf_cpu_map__new(lhs);
+	struct perf_cpu_map *b = perf_cpu_map__new(rhs);
+	struct perf_cpu_map *c = perf_cpu_map__intersect(a, b);
+	char buf[100];
+
+	TEST_ASSERT_EQUAL("failed to intersect map: bad nr", perf_cpu_map__nr(c), nr);
+	cpu_map__snprint(c, buf, sizeof(buf));
+	TEST_ASSERT_VAL("failed to intersect map: bad result", !strcmp(buf, expected));
+	perf_cpu_map__put(a);
+	perf_cpu_map__put(b);
+	perf_cpu_map__put(c);
+	return 0;
+}
+
+int test__cpu_map_intersect(struct test *test __maybe_unused, int subtest __maybe_unused)
+{
+	int ret;
+
+	ret = __test__cpu_map_intersect("4,2,1", "4,5,7", 1, "4");
+	if (ret)
+		return ret;
+	ret = __test__cpu_map_intersect("1-8", "6-9", 3, "6-8");
+	if (ret)
+		return ret;
+	ret = __test__cpu_map_intersect("1-8,12-20", "6-9,15", 4, "6-8,15");
+	if (ret)
+		return ret;
+	ret = __test__cpu_map_intersect("4,2,1", "1", 1, "1");
+	if (ret)
+		return ret;
+	ret = __test__cpu_map_intersect("1", "4,2,1", 1, "1");
+	if (ret)
+		return ret;
+	ret = __test__cpu_map_intersect("1", "1", 1, "1");
+	return ret;
+}
+
