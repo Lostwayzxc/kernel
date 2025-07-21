@@ -2197,6 +2197,7 @@ static void cpu_enable_e0pd(struct arm64_cpu_capabilities const *cap)
 static bool enable_pseudo_nmi;
 #endif
 
+#ifdef CONFIG_ARM64_LS64
 static bool has_ls64(const struct arm64_cpu_capabilities *entry, int __unused)
 {
 	u64 ls64;
@@ -2228,6 +2229,7 @@ static void cpu_enable_ls64_v(struct arm64_cpu_capabilities const *cap)
 {
 	sysreg_clear_set(sctlr_el1, SCTLR_EL1_EnASR, SCTLR_EL1_EnASR);
 }
+#endif
 
 #ifdef CONFIG_ARM64_PSEUDO_NMI
 static int __init early_enable_pseudo_nmi(char *p)
@@ -3038,6 +3040,7 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
 		.cpu_enable = cpu_enable_mpam,
 	},
 #endif
+#ifdef CONFIG_ARM64_LS64
 	{
 		.desc = "LS64",
 		.capability = ARM64_HAS_LS64,
@@ -3054,6 +3057,7 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
 		.cpu_enable = cpu_enable_ls64_v,
 		ARM64_CPUID_FIELDS(ID_AA64ISAR1_EL1, LS64, LS64_V)
 	},
+#endif
 	{},
 };
 
