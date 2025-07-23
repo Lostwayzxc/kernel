@@ -34,8 +34,11 @@ struct its_vm {
 	 */
 	raw_spinlock_t		vmapp_lock;
 	u32			vlpi_count[GICv4_ITS_LIST_MAX];
+#ifdef CONFIG_ARM64_HISI_IPIV
 	struct page         *vpeid_page;
-	bool                  nassgireq;
+	bool			enable_ipiv_from_vmm;
+	bool			enable_ipiv_from_guest;
+#endif
 };
 
 /* Embedded in kvm_vcpu.arch */

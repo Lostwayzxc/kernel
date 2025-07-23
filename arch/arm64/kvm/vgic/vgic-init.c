@@ -13,6 +13,11 @@
 #include <asm/kvm_mmu.h>
 #include "vgic.h"
 
+#ifdef CONFIG_ARM64_HISI_IPIV
+#include <linux/irqchip/arm-gic-v3.h>
+#include "hisilicon/hisi_virt.h"
+#endif
+
 /*
  * Initialization rules: there are multiple stages to the vgic
  * initialization, both for the distributor and the CPU interfaces.  The basic
@@ -520,7 +525,7 @@ out_slots:
 	return ret;
 }
 
-#ifdef CONFIG_ACPI
+#ifdef CONFIG_ARM64_HISI_IPIV
 extern struct static_key_false ipiv_enable;
 static int ipiv_irq;
 #endif
@@ -530,7 +535,7 @@ static int ipiv_irq;
 void kvm_vgic_cpu_up(void)
 {
 	enable_percpu_irq(kvm_vgic_global_state.maint_irq, 0);
-#ifdef CONFIG_ACPI
+#ifdef CONFIG_ARM64_HISI_IPIV
 	if (static_branch_unlikely(&ipiv_enable))
 		enable_percpu_irq(ipiv_irq, 0);
 #endif
@@ -540,16 +545,34 @@ void kvm_vgic_cpu_up(void)
 void kvm_vgic_cpu_down(void)
 {
 	disable_percpu_irq(kvm_vgic_global_state.maint_irq);
-#ifdef CONFIG_ACPI
+#ifdef CONFIG_ARM64_HISI_IPIV
 	if (static_branch_unlikely(&ipiv_enable))
 		disable_percpu_irq(ipiv_irq);
 #endif
 }
 
-#ifdef CONFIG_ACPI
+#ifdef CONFIG_ARM64_HISI_IPIV
+extern void __iomem *gic_data_rdist_get_vlpi_base(void);
 static irqreturn_t vgic_ipiv_irq_handler(int irq, void *data)
 {
-	kvm_info("IPIV irq handler!\n");
+	void __iomem *vlpi_base = gic_data_rdist_get_vlpi_base();
+	u32 gicr_ipiv_st;
+	bool broadcast_err, grpbrd_err, vcpuidx_err;
+
+	gicr_ipiv_st = readl_relaxed(vlpi_base + GICR_IPIV_ST);
+
+	broadcast_err = !!(gicr_ipiv_st & GICR_IPIV_ST_IRM_ERR);
+	if (broadcast_err)
+		kvm_err("IPIV error: IRM=1 Guest broadcast error\n");
+
+	grpbrd_err = !!(gicr_ipiv_st & GICR_IPIV_ST_BRPBRD_ERR);
+	if (grpbrd_err)
+		kvm_err("IPIV error: Guest group broadcast error\n");
+
+	vcpuidx_err = !!(gicr_ipiv_st & GICR_IPIV_ST_VCPUIDX_ERR);
+	if (vcpuidx_err)
+		kvm_err("IPIV error: The VCPU index is out of range\n");
+
 	return IRQ_HANDLED;
 }
 #endif
@@ -662,7 +685,14 @@ int kvm_vgic_hyp_init(void)
 
 	kvm_info("vgic interrupt IRQ%d\n", kvm_vgic_global_state.maint_irq);
 
-#ifdef CONFIG_ACPI
+#ifdef CONFIG_ARM64_HISI_IPIV
+	if (hisi_ipiv_supported()) {
+		ipiv_gicd_init();
+		kvm_info("KVM ipiv enabled\n");
+	} else {
+		kvm_info("KVM ipiv disabled\n");
+	}
+
 	if (static_branch_unlikely(&ipiv_enable)) {
 		ipiv_irq = acpi_register_gsi(NULL, 18, ACPI_EDGE_SENSITIVE,
 			ACPI_ACTIVE_HIGH);
