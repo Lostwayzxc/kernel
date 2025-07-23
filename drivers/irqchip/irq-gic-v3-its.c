@@ -426,12 +426,6 @@ static int alloc_devid_from_rsv_pools(struct rsv_devid_pool **devid_pool,
  */
 void build_devid_pools(void)
 {
-	struct its_node *its;
-
-	its = list_first_entry(&its_nodes, struct its_node, entry);
-	if (readl_relaxed(its->base + GITS_IIDR) != 0x00051736)
-		return;
-
 	if (!probe_devid_pool_one())
 		rsv_devid_pool_cap = true;
 
