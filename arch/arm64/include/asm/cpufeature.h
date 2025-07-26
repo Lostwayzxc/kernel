@@ -619,6 +619,20 @@ static inline bool id_aa64pfr0_sve(u64 pfr0)
 	return val > 0;
 }
 
+static inline bool id_aa64pfr0_mpam(u64 pfr0)
+{
+	u32 val = cpuid_feature_extract_unsigned_field(pfr0, ID_AA64PFR0_EL1_MPAM_SHIFT);
+
+	return val > 0;
+}
+
+static inline bool id_aa64pfr1_mpamfrac(u64 pfr1)
+{
+	u32 val = cpuid_feature_extract_unsigned_field(pfr1, ID_AA64PFR1_EL1_MPAM_frac_SHIFT);
+
+	return val > 0;
+}
+
 static inline bool id_aa64pfr1_mte(u64 pfr1)
 {
 	u32 val = cpuid_feature_extract_unsigned_field(pfr1, ID_AA64PFR1_MTE_SHIFT);
@@ -807,6 +821,14 @@ static inline bool system_supports_tlb_range(void)
 	return IS_ENABLED(CONFIG_ARM64_TLB_RANGE) &&
 		cpus_have_const_cap(ARM64_HAS_TLB_RANGE);
 }
+
+static inline bool cpus_support_mpam(void)
+{
+	return IS_ENABLED(CONFIG_ARM64_MPAM) &&
+		cpus_have_final_cap(ARM64_MPAM);
+}
+
+bool mpam_detect_is_enabled(void);
 
 static inline bool system_supports_haft(void)
 {

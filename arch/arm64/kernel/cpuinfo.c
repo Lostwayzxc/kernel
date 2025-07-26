@@ -415,6 +415,12 @@ static void __cpuinfo_store_cpu(struct cpuinfo_arm64 *info)
 	    id_aa64pfr0_sve(info->reg_id_aa64pfr0))
 		info->reg_zcr = read_zcr_features();
 
+	if (IS_ENABLED(CONFIG_ARM64_MPAM) &&
+	    mpam_detect_is_enabled() &&
+	   (id_aa64pfr0_mpam(info->reg_id_aa64pfr0) ||
+	    id_aa64pfr1_mpamfrac(info->reg_id_aa64pfr1)))
+		info->reg_mpamidr = read_cpuid(MPAMIDR_EL1);
+
 	cpuinfo_detect_icache_policy(info);
 }
 

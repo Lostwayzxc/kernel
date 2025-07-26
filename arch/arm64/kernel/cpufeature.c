@@ -83,6 +83,7 @@
 #include <asm/insn.h>
 #include <asm/kvm_host.h>
 #include <asm/mmu_context.h>
+#include <asm/mpam.h>
 #include <asm/mte.h>
 #include <asm/processor.h>
 #include <asm/smp.h>
@@ -559,6 +560,18 @@ static const struct arm64_ftr_bits ftr_zcr[] = {
 	ARM64_FTR_END,
 };
 
+static const struct arm64_ftr_bits ftr_mpamidr[] = {
+	ARM64_FTR_BITS(FTR_HIDDEN, FTR_NONSTRICT, FTR_LOWER_SAFE,
+		MPAMIDR_PMG_MAX_SHIFT, MPAMIDR_PMG_MAX_LEN, 0),        /* PMG_MAX */
+	ARM64_FTR_BITS(FTR_HIDDEN, FTR_NONSTRICT, FTR_LOWER_SAFE,
+		MPAMIDR_VPMR_MAX_SHIFT, MPAMIDR_VPMR_MAX_LEN, 0),      /* VPMR_MAX */
+	ARM64_FTR_BITS(FTR_HIDDEN, FTR_STRICT, FTR_LOWER_SAFE,
+		MPAMIDR_HAS_HCR_SHIFT, 1, 0), /* HAS_HCR */
+	ARM64_FTR_BITS(FTR_HIDDEN, FTR_NONSTRICT, FTR_LOWER_SAFE,
+		MPAMIDR_PARTID_MAX_SHIFT, MPAMIDR_PARTID_MAX_LEN, 0),  /* PARTID_MAX */
+	ARM64_FTR_END,
+};
+
 /*
  * Common ftr bits for a 32bit register with all hidden, strict
  * attributes, with 4bit feature fields and a default safe value of
@@ -661,6 +674,9 @@ static const struct __ftr_reg_entry {
 
 	/* Op1 = 0, CRn = 1, CRm = 2 */
 	ARM64_FTR_REG(SYS_ZCR_EL1, ftr_zcr),
+
+	/* Op1 = 0, CRn = 10, CRm = 4 */
+	ARM64_FTR_REG(SYS_MPAMIDR_EL1, ftr_mpamidr),
 
 	/* Op1 = 1, CRn = 0, CRm = 0 */
 	ARM64_FTR_REG(SYS_GMID_EL1, ftr_gmid),
@@ -964,6 +980,11 @@ void __init init_cpu_features(struct cpuinfo_arm64 *info)
 		sve_init_vq_map();
 	}
 
+	if (mpam_detect_is_enabled() &&
+	   (id_aa64pfr0_mpam(info->reg_id_aa64pfr0) ||
+	    id_aa64pfr1_mpamfrac(info->reg_id_aa64pfr1)))
+		init_cpu_ftr_reg(SYS_MPAMIDR_EL1, info->reg_mpamidr);
+
 	if (id_aa64pfr1_mte(info->reg_id_aa64pfr1))
 		init_cpu_ftr_reg(SYS_GMID_EL1, info->reg_gmid);
 
@@ -1198,6 +1219,13 @@ void update_cpu_features(int cpu,
 		if (id_aa64pfr0_sve(read_sanitised_ftr_reg(SYS_ID_AA64PFR0_EL1)) &&
 		    !system_capabilities_finalized())
 			sve_update_vq_map();
+	}
+
+	if (mpam_detect_is_enabled() &&
+	   (id_aa64pfr0_mpam(info->reg_id_aa64pfr0) ||
+	    id_aa64pfr1_mpamfrac(info->reg_id_aa64pfr1))) {
+		taint |= check_update_ftr_reg(SYS_MPAMIDR_EL1, cpu,
+					info->reg_mpamidr, boot->reg_mpamidr);
 	}
 
 	/*
@@ -1968,6 +1996,78 @@ cpucap_panic_on_conflict(const struct arm64_cpu_capabilities *cap)
 	return !!(cap->type & ARM64_CPUCAP_PANIC_ON_CONFLICT);
 }
 
+static bool __read_mostly mpam_force_enabled;
+bool mpam_detect_is_enabled(void)
+{
+	return mpam_force_enabled;
+}
+
+static int __init mpam_setup(char *str)
+{
+	mpam_force_enabled = true;
+	return 0;
+}
+early_param("arm64.mpam", mpam_setup);
+
+static bool __maybe_unused
+test_has_mpam(const struct arm64_cpu_capabilities *entry, int scope)
+{
+	u64 pfr0 = read_sanitised_ftr_reg(SYS_ID_AA64PFR0_EL1);
+	u64 pfr1 = read_sanitised_ftr_reg(SYS_ID_AA64PFR1_EL1);
+
+	if (!id_aa64pfr0_mpam(pfr0) &&
+	    !id_aa64pfr1_mpamfrac(pfr1))
+		return false;
+
+	if (is_kdump_kernel())
+		return false;
+
+	if (!mpam_detect_is_enabled())
+		return false;
+
+	/* Check firmware actually enabled MPAM on this cpu. */
+	return (read_sysreg_s(SYS_MPAM1_EL1) & MPAM_SYSREG_EN);
+}
+
+static void __maybe_unused
+cpu_enable_mpam(const struct arm64_cpu_capabilities *entry)
+{
+	u64 idr = read_sanitised_ftr_reg(SYS_MPAMIDR_EL1);
+	int cpu = smp_processor_id();
+	u64 regval = 0;
+
+	if (IS_ENABLED(CONFIG_ARM64_MPAM))
+		regval = READ_ONCE(per_cpu(arm64_mpam_current, cpu));
+
+	/*
+	 * Initialise MPAM EL2 registers and disable EL2 traps.
+	 */
+	write_sysreg_s(0, SYS_MPAM2_EL2);
+
+	if (idr & MPAMIDR_HAS_HCR)
+		write_sysreg_s(0, SYS_MPAMHCR_EL2);
+
+	/*
+	 * Access by the kernel (at EL1) should use the reserved PARTID
+	 * which is configured unrestricted. This avoids priority-inversion
+	 * where latency sensitive tasks have to wait for a task that has
+	 * been throttled to release the lock.
+	 */
+	write_sysreg_s(0, SYS_MPAM1_EL1);
+	write_sysreg_s(regval, SYS_MPAM0_EL1);
+}
+
+static void mpam_extra_caps(void)
+{
+	u64 idr = read_sanitised_ftr_reg(SYS_MPAMIDR_EL1);
+
+	if (!IS_ENABLED(CONFIG_ARM64_MPAM))
+		return;
+
+	if (idr & MPAMIDR_HAS_HCR)
+		__enable_mpam_hcr();
+}
+
 static const struct arm64_cpu_capabilities arm64_features[] = {
 	{
 		.desc = "GIC system register CPU interface",
@@ -2430,6 +2530,15 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
 		.matches = has_cpuid_feature,
 		.cpu_enable = cpu_trap_el0_impdef,
 	},
+#ifdef CONFIG_ARM64_MPAM
+	{
+		.desc = "Memory Partitioning And Monitoring",
+		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
+		.capability = ARM64_MPAM,
+		.matches = test_has_mpam,
+		.cpu_enable = cpu_enable_mpam,
+	},
+#endif
 	{},
 };
 
@@ -3022,6 +3131,8 @@ void __init setup_cpu_features(void)
 
 	/* Advertise that we have computed the system capabilities */
 	finalize_system_capabilities();
+
+	mpam_extra_caps();
 
 	/*
 	 * Check for sane CTR_EL0.CWG value.
