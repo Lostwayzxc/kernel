@@ -926,6 +926,14 @@ bool resctrl_arch_would_mbm_overflow(void)
 	return read_cpuid_implementor() != ARM_CPU_IMP_HISI;
 }
 
+static bool mpam_ris_has_nrdy_bit(struct mpam_msc_ris *ris)
+{
+	if (ris->comp->class->type == MPAM_CLASS_MEMORY)
+		return read_cpuid_implementor() != ARM_CPU_IMP_HISI;
+
+	return true;
+}
+
 static void __ris_msmon_read(void *arg)
 {
 	bool nrdy = false;
@@ -1000,6 +1008,9 @@ static void __ris_msmon_read(void *arg)
 			now = FIELD_GET(MSMON___VALUE, now);
 		}
 
+		if (config_mismatch && !mpam_ris_has_nrdy_bit(ris))
+			nrdy = true;
+
 		if (nrdy)
 			break;
 
@@ -1044,7 +1055,7 @@ static void __ris_msmon_read(void *arg)
 
 static int _msmon_read(struct mpam_component *comp, struct mon_read *arg)
 {
-	int err, idx;
+	int err = 0, idx;
 	bool read_again;
 	u64 wait_jiffies;
 	struct mpam_msc *msc;
@@ -1615,7 +1626,6 @@ static int mpam_msc_setup_error_irq(struct mpam_msc *msc)
 
 	/* Allocate and initialise the percpu device pointer for PPI */
 	if (irq_is_percpu(irq))
-
 		return __setup_ppi(msc);
 
 	/* sanity check: shared interrupts can be routed anywhere? */
@@ -1685,7 +1695,7 @@ static int mpam_dt_parse_resource(struct mpam_msc *msc, struct device_node *np,
 
 static int mpam_dt_parse_resources(struct mpam_msc *msc, void *ignored)
 {
-	int err, num_ris = 0;
+	int err = 0, num_ris = 0;
 	const u32 *ris_idx_p;
 	struct device_node *iter, *np;
 
