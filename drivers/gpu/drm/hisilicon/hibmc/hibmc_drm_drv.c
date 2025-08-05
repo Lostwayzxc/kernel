@@ -29,7 +29,7 @@
 
 DEFINE_DRM_GEM_FOPS(hibmc_fops);
 
-static const char *g_irqs_names_map[HIBMC_MAX_VECTORS] = { "hibmc-vblank", "hibmc-hpd" };
+static const char *g_irqs_names_map[HIBMC_MAX_VECTORS] = { "vblank", "hpd" };
 
 static irqreturn_t hibmc_interrupt(int irq, void *arg)
 {
@@ -286,6 +286,7 @@ static void hibmc_unload(struct drm_device *dev)
 static int hibmc_msi_init(struct drm_device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
+	char name[32] = {0};
 	int valid_irq_num;
 	int irq;
 	int ret;
@@ -299,9 +300,10 @@ static int hibmc_msi_init(struct drm_device *dev)
 
 	valid_irq_num = ret;
 
-	int i;
+	for (int i = 0; i < valid_irq_num; i++) {
+		snprintf(name, ARRAY_SIZE(name) - 1, "%s-%s-%s",
+			 dev->driver->name, pci_name(pdev), g_irqs_names_map[i]);
 
-	for (i = 0; i < valid_irq_num; i++) {
 		irq = pci_irq_vector(pdev, i);
 
 		if (i)
@@ -309,10 +311,10 @@ static int hibmc_msi_init(struct drm_device *dev)
 			ret = devm_request_threaded_irq(&pdev->dev, irq,
 							hibmc_dp_interrupt,
 							hibmc_dp_hpd_isr,
-							IRQF_SHARED, g_irqs_names_map[i], dev);
+							IRQF_SHARED, name, dev);
 		else
 			ret = devm_request_irq(&pdev->dev, irq, hibmc_interrupt,
-					       IRQF_SHARED, g_irqs_names_map[i], dev);
+					       IRQF_SHARED, name, dev);
 		if (ret) {
 			drm_err(dev, "install irq failed: %d\n", ret);
 			return ret;
