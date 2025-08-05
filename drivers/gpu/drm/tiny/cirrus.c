@@ -16,6 +16,7 @@
  * Copyright 1999-2001 Jeff Garzik <jgarzik@pobox.com>
  */
 
+#include <linux/console.h>
 #include <linux/dma-buf-map.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -635,9 +636,8 @@ static struct pci_driver cirrus_pci_driver = {
 
 static int __init cirrus_init(void)
 {
-	if (drm_firmware_drivers_only())
+	if (vgacon_text_force())
 		return -EINVAL;
-
 	return pci_register_driver(&cirrus_pci_driver);
 }
 
