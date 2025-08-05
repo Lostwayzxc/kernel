@@ -5628,8 +5628,8 @@ static int add_displayid_detailed_modes(struct drm_connector *connector,
 	return num_modes;
 }
 
-static int _drm_edid_connector_add_modes(struct drm_connector *connector,
-					 const struct drm_edid *drm_edid)
+static int _drm_edid_connector_update(struct drm_connector *connector,
+				      const struct drm_edid *drm_edid)
 {
 	int num_modes = 0;
 	u32 quirks;
@@ -5638,6 +5638,13 @@ static int _drm_edid_connector_add_modes(struct drm_connector *connector,
 		clear_eld(connector);
 		return 0;
 	}
+
+	/*
+	 * CEA-861-F adds ycbcr capability map block, for HDMI 2.0 sinks.
+	 * To avoid multiple parsing of same block, lets parse that map
+	 * from sink info, before parsing CEA modes.
+	 */
+	quirks = update_display_info(connector, drm_edid);
 
 	/*
 	 * EDID spec says modes should be preferred in this order:
@@ -5769,9 +5776,7 @@ int drm_edid_connector_update(struct drm_connector *connector,
 	 * set via debugfs should take effect.
 	 */
 
-	update_display_info(connector, drm_edid);
-
-	count = _drm_edid_connector_add_modes(connector, drm_edid);
+	count = _drm_edid_connector_update(connector, drm_edid);
 
 	_drm_update_tile_info(connector, drm_edid);
 
@@ -5848,8 +5853,7 @@ EXPORT_SYMBOL(drm_connector_update_edid_property);
  */
 int drm_add_edid_modes(struct drm_connector *connector, struct edid *edid)
 {
-	struct drm_edid _drm_edid;
-	const struct drm_edid *drm_edid;
+	struct drm_edid drm_edid;
 
 	if (edid && !drm_edid_is_valid(edid)) {
 		drm_warn(connector->dev, "%s: EDID invalid.\n",
@@ -5857,11 +5861,8 @@ int drm_add_edid_modes(struct drm_connector *connector, struct edid *edid)
 		edid = NULL;
 	}
 
-	drm_edid = drm_edid_legacy_init(&_drm_edid, edid);
-
-	update_display_info(connector, drm_edid);
-
-	return _drm_edid_connector_add_modes(connector, drm_edid);
+	return _drm_edid_connector_update(connector,
+					  drm_edid_legacy_init(&drm_edid, edid));
 }
 EXPORT_SYMBOL(drm_add_edid_modes);
 
