@@ -9,22 +9,6 @@
 
 #define HIBMC_EQ_MAX_RETRY 5
 
-static inline int hibmc_dp_get_serdes_rate_cfg(struct hibmc_dp_dev *dp)
-{
-	switch (dp->link.cap.link_rate) {
-	case DP_LINK_BW_1_62:
-		return DP_SERDES_BW_1_62;
-	case DP_LINK_BW_2_7:
-		return DP_SERDES_BW_2_7;
-	case DP_LINK_BW_5_4:
-		return DP_SERDES_BW_5_4;
-	case DP_LINK_BW_8_1:
-		return DP_SERDES_BW_8_1;
-	default:
-		return -EINVAL;
-	}
-}
-
 static int hibmc_dp_link_training_configure(struct hibmc_dp_dev *dp)
 {
 	u8 buf[2];
@@ -57,7 +41,11 @@ static int hibmc_dp_link_training_configure(struct hibmc_dp_dev *dp)
 		return ret >= 0 ? -EIO : ret;
 	}
 
-	return 0;
+	ret = drm_dp_read_dpcd_caps(&dp->aux, dp->dpcd);
+	if (ret)
+		drm_err(dp->dev, "dp aux read dpcd failed, ret: %d\n", ret);
+
+	return ret;
 }
 
 static int hibmc_dp_link_set_pattern(struct hibmc_dp_dev *dp, int pattern)
@@ -120,11 +108,7 @@ static int hibmc_dp_link_training_cr_pre(struct hibmc_dp_dev *dp)
 		return ret;
 
 	for (i = 0; i < dp->link.cap.lanes; i++)
-		train_set[i] = DP_TRAIN_VOLTAGE_SWING_LEVEL_0;
-
-	ret = hibmc_dp_serdes_set_tx_cfg(dp, dp->link.train_set);
-	if (ret)
-		return ret;
+		train_set[i] = DP_TRAIN_VOLTAGE_SWING_LEVEL_2;
 
 	ret = drm_dp_dpcd_write(&dp->aux, DP_TRAINING_LANE0_SET, train_set, dp->link.cap.lanes);
 	if (ret != dp->link.cap.lanes) {
@@ -153,29 +137,21 @@ static bool hibmc_dp_link_get_adjust_train(struct hibmc_dp_dev *dp,
 	return false;
 }
 
-static int hibmc_dp_link_reduce_rate(struct hibmc_dp_dev *dp)
+static inline int hibmc_dp_link_reduce_rate(struct hibmc_dp_dev *dp)
 {
-	int ret;
-
 	switch (dp->link.cap.link_rate) {
 	case DP_LINK_BW_2_7:
 		dp->link.cap.link_rate = DP_LINK_BW_1_62;
-		break;
+		return 0;
 	case DP_LINK_BW_5_4:
 		dp->link.cap.link_rate = DP_LINK_BW_2_7;
-		break;
+		return 0;
 	case DP_LINK_BW_8_1:
 		dp->link.cap.link_rate = DP_LINK_BW_5_4;
-		break;
+		return 0;
 	default:
 		return -EINVAL;
 	}
-
-	ret = hibmc_dp_get_serdes_rate_cfg(dp);
-	if (ret < 0)
-		return ret;
-
-	return hibmc_dp_serdes_rate_switch(ret, dp);
 }
 
 static inline int hibmc_dp_link_reduce_lane(struct hibmc_dp_dev *dp)
@@ -183,7 +159,6 @@ static inline int hibmc_dp_link_reduce_lane(struct hibmc_dp_dev *dp)
 	switch (dp->link.cap.lanes) {
 	case 0x2:
 		dp->link.cap.lanes--;
-		drm_dbg_dp(dp->dev, "dp link training reduce to 1 lane\n");
 		break;
 	case 0x1:
 		drm_err(dp->dev, "dp link training reduce lane failed, already reach minimum\n");
@@ -231,11 +206,6 @@ static int hibmc_dp_link_training_cr(struct hibmc_dp_dev *dp)
 		}
 
 		level_changed = hibmc_dp_link_get_adjust_train(dp, lane_status);
-
-		ret = hibmc_dp_serdes_set_tx_cfg(dp, dp->link.train_set);
-		if (ret)
-			return ret;
-
 		ret = drm_dp_dpcd_write(&dp->aux, DP_TRAINING_LANE0_SET, dp->link.train_set,
 					dp->link.cap.lanes);
 		if (ret != dp->link.cap.lanes) {
@@ -285,11 +255,6 @@ static int hibmc_dp_link_training_channel_eq(struct hibmc_dp_dev *dp)
 		}
 
 		hibmc_dp_link_get_adjust_train(dp, lane_status);
-
-		ret = hibmc_dp_serdes_set_tx_cfg(dp, dp->link.train_set);
-		if (ret)
-			return ret;
-
 		ret = drm_dp_dpcd_write(&dp->aux, DP_TRAINING_LANE0_SET,
 					dp->link.train_set, dp->link.cap.lanes);
 		if (ret != dp->link.cap.lanes) {
@@ -329,21 +294,6 @@ int hibmc_dp_link_training(struct hibmc_dp_dev *dp)
 {
 	struct hibmc_dp_link *link = &dp->link;
 	int ret;
-
-	ret = drm_dp_read_dpcd_caps(&dp->aux, dp->dpcd);
-	if (ret)
-		drm_err(dp->dev, "dp aux read dpcd failed, ret: %d\n", ret);
-
-	dp->link.cap.link_rate = dp->dpcd[DP_MAX_LINK_RATE];
-	dp->link.cap.lanes = 0x2;
-
-	ret = hibmc_dp_get_serdes_rate_cfg(dp);
-	if (ret < 0)
-		return ret;
-
-	ret = hibmc_dp_serdes_rate_switch(ret, dp);
-	if (ret)
-		return ret;
 
 	while (true) {
 		ret = hibmc_dp_link_training_cr_pre(dp);

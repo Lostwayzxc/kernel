@@ -25,7 +25,9 @@
 #include "hibmc_drm_drv.h"
 #include "hibmc_drm_regs.h"
 
-#include "dp/dp_reg.h"
+#define HIBMC_DP_HOST_SERDES_CTRL		0x1f001c
+#define HIBMC_DP_HOST_SERDES_CTRL_VAL		0x8a00
+#define HIBMC_DP_HOST_SERDES_CTRL_MASK		0x7ffff
 
 DEFINE_DRM_GEM_FOPS(hibmc_fops);
 
@@ -118,12 +120,9 @@ static int hibmc_kms_init(struct hibmc_drm_private *priv)
 		return ret;
 	}
 
-	/*
-	 * If the serdes reg is readable and is not equal to 0,
-	 * DP block exists and initializes it.
-	 */
-	ret = readl(priv->mmio + HIBMC_DP_HOST_SERDES_CTRL);
-	if (ret) {
+	/* if DP existed, init DP */
+	if ((readl(priv->mmio + HIBMC_DP_HOST_SERDES_CTRL) &
+	     HIBMC_DP_HOST_SERDES_CTRL_MASK) == HIBMC_DP_HOST_SERDES_CTRL_VAL) {
 		ret = hibmc_dp_init(priv);
 		if (ret)
 			drm_err(dev, "failed to init dp: %d\n", ret);
