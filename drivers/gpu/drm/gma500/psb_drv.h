@@ -536,7 +536,6 @@ struct drm_psb_private {
 	uint32_t blc_adj2;
 
 	struct drm_fb_helper *fb_helper;
-	resource_size_t fb_base;
 
 	/* Panel brightness */
 	int brightness;
