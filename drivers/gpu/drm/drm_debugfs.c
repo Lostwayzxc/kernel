@@ -350,20 +350,31 @@ static ssize_t edid_write(struct file *file, const char __user *ubuf,
 	struct seq_file *m = file->private_data;
 	struct drm_connector *connector = m->private;
 	char *buf;
+	struct edid *edid;
 	int ret;
 
 	buf = memdup_user(ubuf, len);
 	if (IS_ERR(buf))
 		return PTR_ERR(buf);
 
-	if (len == 5 && !strncmp(buf, "reset", 5))
-		ret = drm_edid_override_reset(connector);
-	else
-		ret = drm_edid_override_set(connector, buf, len);
+	edid = (struct edid *) buf;
+
+	if (len == 5 && !strncmp(buf, "reset", 5)) {
+		connector->override_edid = false;
+		ret = drm_connector_update_edid_property(connector, NULL);
+	} else if (len < EDID_LENGTH ||
+		   EDID_LENGTH * (1 + edid->extensions) > len)
+		ret = -EINVAL;
+	else {
+		connector->override_edid = false;
+		ret = drm_connector_update_edid_property(connector, edid);
+		if (!ret)
+			connector->override_edid = true;
+	}
 
 	kfree(buf);
 
-	return ret ? ret : len;
+	return (ret) ? ret : len;
 }
 
 /*
@@ -425,9 +436,6 @@ void drm_debugfs_connector_add(struct drm_connector *connector)
 	/* vrr range */
 	debugfs_create_file("vrr_range", S_IRUGO, root, connector,
 			    &vrr_range_fops);
-
-	if (connector->funcs->debugfs_init)
-		connector->funcs->debugfs_init(connector, root);
 }
 
 void drm_debugfs_connector_remove(struct drm_connector *connector)

@@ -20,7 +20,7 @@
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_gem_vram_helper.h>
 #include <drm/drm_managed.h>
-#include <drm/drm_module.h>
+#include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 
 #include "hibmc_drm_drv.h"
@@ -82,6 +82,7 @@ static const struct drm_driver hibmc_driver = {
 	.debugfs_init		= drm_vram_mm_debugfs_init,
 	.dumb_create            = hibmc_dumb_create,
 	.dumb_map_offset        = drm_gem_ttm_dumb_map_offset,
+	.gem_prime_mmap		= drm_gem_prime_mmap,
 };
 
 static int __maybe_unused hibmc_pm_suspend(struct device *dev)
@@ -124,7 +125,8 @@ static int hibmc_kms_init(struct hibmc_drm_private *priv)
 	dev->mode_config.max_width = 1920;
 	dev->mode_config.max_height = 1200;
 
-	dev->mode_config.preferred_depth = 24;
+	dev->mode_config.preferred_depth = 32;
+	dev->mode_config.fb_base = priv->fb_base;
 	dev->mode_config.prefer_shadow = 1;
 
 	dev->mode_config.funcs = (void *)&hibmc_mode_funcs;
@@ -154,6 +156,7 @@ static int hibmc_kms_init(struct hibmc_drm_private *priv)
 		goto err;
 	}
 
+	drm_kms_helper_poll_init(dev);
 	return 0;
 
 err:
@@ -248,7 +251,7 @@ static int hibmc_hw_map(struct hibmc_drm_private *priv)
 {
 	struct drm_device *dev = &priv->dev;
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
-	resource_size_t ioaddr, iosize;
+	resource_size_t addr, size, ioaddr, iosize;
 
 	ioaddr = pci_resource_start(pdev, 1);
 	iosize = pci_resource_len(pdev, 1);
@@ -257,6 +260,16 @@ static int hibmc_hw_map(struct hibmc_drm_private *priv)
 		drm_err(dev, "Cannot map mmio region\n");
 		return -ENOMEM;
 	}
+
+	addr = pci_resource_start(pdev, 0);
+	size = pci_resource_len(pdev, 0);
+	priv->fb_map = devm_ioremap(dev->dev, addr, size);
+	if (!priv->fb_map) {
+		drm_err(dev, "Cannot map framebuffer\n");
+		return -ENOMEM;
+	}
+	priv->fb_base = addr;
+	priv->fb_size = size;
 
 	return 0;
 }
@@ -285,6 +298,7 @@ static int hibmc_msi_init(struct drm_device *dev)
 	int valid_irq_num;
 	int irq;
 	int ret;
+	int i;
 
 	ret = pci_alloc_irq_vectors(pdev, HIBMC_MIN_VECTORS,
 				    HIBMC_MAX_VECTORS, PCI_IRQ_MSI);
@@ -294,8 +308,6 @@ static int hibmc_msi_init(struct drm_device *dev)
 	}
 
 	valid_irq_num = ret;
-
-	int i;
 
 	for (i = 0; i < valid_irq_num; i++) {
 		irq = pci_irq_vector(pdev, i);
@@ -328,8 +340,7 @@ static int hibmc_load(struct drm_device *dev)
 	if (ret)
 		return ret;
 
-	ret = drmm_vram_helper_init(dev, pci_resource_start(pdev, 0),
-				    pci_resource_len(pdev, 0));
+	ret = drmm_vram_helper_init(dev, pci_resource_start(pdev, 0), priv->fb_size);
 	if (ret) {
 		drm_err(dev, "Error initializing VRAM MM; %d\n", ret);
 		return ret;
@@ -406,7 +417,7 @@ static int hibmc_pci_probe(struct pci_dev *pdev,
 		goto err_unload;
 	}
 
-	drm_fbdev_generic_setup(dev, 32);
+	drm_fbdev_generic_setup(dev, dev->mode_config.preferred_depth);
 
 	return 0;
 
@@ -443,7 +454,7 @@ static struct pci_driver hibmc_pci_driver = {
 	.driver.pm =    &hibmc_pm_ops,
 };
 
-drm_module_pci_driver(hibmc_pci_driver);
+module_pci_driver(hibmc_pci_driver);
 
 MODULE_DEVICE_TABLE(pci, hibmc_pci_table);
 MODULE_AUTHOR("RongrongZou <zourongrong@huawei.com>");

@@ -135,14 +135,14 @@ static struct drm_info_list hibmc_debugfs_list[] = {
 		{ "hibmc-dp", hibmc_dp_show },
 };
 
-void hibmc_debugfs_init(struct drm_connector *connector, struct dentry *root)
+void hibmc_debugfs_init(struct drm_connector *connector)
 {
 	struct drm_device *dev = connector->dev;
 	struct hibmc_drm_private *priv = to_hibmc_drm_private(dev);
 	struct drm_minor *minor = dev->primary;
 
 	/* create the file in drm directory, so we don't need to remove manually */
-	debugfs_create_file("colorbar-cfg", 0200, root, priv, &hibmc_dbg_fops);
+	debugfs_create_file("colorbar-cfg", 0200, minor->debugfs_root, priv, &hibmc_dbg_fops);
 
 	drm_debugfs_create_files(hibmc_debugfs_list, ARRAY_SIZE(hibmc_debugfs_list),
 				 minor->debugfs_root, minor);

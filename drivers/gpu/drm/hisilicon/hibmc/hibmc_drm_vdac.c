@@ -23,16 +23,14 @@
 
 static int hibmc_connector_get_modes(struct drm_connector *connector)
 {
-	struct hibmc_vdac *vdac = to_hibmc_vdac(connector);
-	const struct drm_edid *drm_edid;
 	int count;
+	void *edid;
+	struct hibmc_vdac *vdac = to_hibmc_vdac(connector);
 
-	drm_edid = drm_edid_read_ddc(connector, &vdac->adapter);
-
-	drm_edid_connector_update(connector, drm_edid);
-
-	if (drm_edid) {
-		count = drm_edid_connector_add_modes(connector);
+	edid = drm_get_edid(connector, &vdac->adapter);
+	if (edid) {
+		drm_connector_update_edid_property(connector, edid);
+		count = drm_add_edid_modes(connector, edid);
 		if (count)
 			goto out;
 	}
@@ -43,8 +41,7 @@ static int hibmc_connector_get_modes(struct drm_connector *connector)
 	drm_set_preferred_mode(connector, 1024, 768);
 
 out:
-	drm_edid_free(drm_edid);
-
+	kfree(edid);
 	return count;
 }
 
@@ -132,7 +129,7 @@ int hibmc_vdac_init(struct hibmc_drm_private *priv)
 	}
 
 	encoder->possible_crtcs = drm_crtc_mask(crtc);
-	ret = drmm_encoder_init(dev, encoder, NULL, DRM_MODE_ENCODER_DAC, NULL);
+	ret = drm_simple_encoder_init(dev, encoder, DRM_MODE_ENCODER_DAC);
 	if (ret) {
 		drm_err(dev, "failed to init encoder: %d\n", ret);
 		goto err;

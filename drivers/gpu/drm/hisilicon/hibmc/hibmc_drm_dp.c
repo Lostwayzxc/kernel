@@ -19,25 +19,33 @@
 
 static int hibmc_dp_connector_get_modes(struct drm_connector *connector)
 {
-	struct hibmc_dp *dp = to_hibmc_dp(connector);
-	const struct drm_edid *drm_edid;
 	int count;
+	struct hibmc_dp *dp = to_hibmc_dp(connector);
+	struct edid *edid;
 
-	drm_edid = drm_edid_read(connector);
+	edid = drm_get_edid(connector, &dp->aux.ddc);
+	if (edid) {
+		drm_connector_update_edid_property(connector, edid);
+		count = drm_add_edid_modes(connector, edid);
+		if (count) {
+			dp->is_connected = true;
+			goto out;
+		}
+	}
 
-	drm_edid_connector_update(connector, drm_edid);
+	dp->is_connected = false;
 
-	count = drm_edid_connector_add_modes(connector);
-	if (count)
-		dp->is_connected = true;
-	else
-		dp->is_connected = false;
+	count = drm_add_modes_noedid(connector,
+				     connector->dev->mode_config.max_width,
+				     connector->dev->mode_config.max_height);
+	drm_set_preferred_mode(connector, 1024, 768);
 
-	drm_edid_free(drm_edid);
+out:
+	kfree(edid);
 
 	return count;
 }
-
+ 
 static int hibmc_dp_mode_valid(struct drm_connector *connector,
 			       struct drm_display_mode *mode,
 			       struct drm_modeset_acquire_ctx *ctx,
@@ -104,7 +112,6 @@ static const struct drm_connector_funcs hibmc_dp_conn_funcs = {
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 	.late_register = hibmc_dp_late_register,
 	.early_unregister = hibmc_dp_early_unregister,
-	.debugfs_init = hibmc_debugfs_init,
 };
 
 static inline int hibmc_dp_prepare(struct hibmc_dp *dp, struct drm_display_mode *mode)
@@ -178,7 +185,7 @@ irqreturn_t hibmc_dp_hpd_isr(int irq, void *arg)
 			hibmc_dp_reset_link(dp);
 			dp->hpd_status = 0;
 			if (dev->registered)
-				drm_connector_helper_hpd_irq_event(&dp->connector);
+				drm_helper_hpd_irq_event(dev);
 		} else {
 			drm_dbg_dp(dev, "HPD OUT occur but err!\n");
 		}
@@ -188,7 +195,7 @@ irqreturn_t hibmc_dp_hpd_isr(int irq, void *arg)
 			hibmc_dp_hpd_cfg(dp);
 			dp->hpd_status = 1;
 			if (dev->registered)
-				drm_connector_helper_hpd_irq_event(&dp->connector);
+				drm_helper_hpd_irq_event(dev);
 		} else {
 			drm_dbg_dp(dev, "HPD IN occur but err!\n");
 		}
@@ -220,7 +227,7 @@ int hibmc_dp_init(struct hibmc_drm_private *priv)
 	hibmc_dp_display_en(&priv->dp, false);
 
 	encoder->possible_crtcs = drm_crtc_mask(crtc);
-	ret = drmm_encoder_init(dev, encoder, NULL, DRM_MODE_ENCODER_TMDS, NULL);
+	ret = drm_simple_encoder_init(dev, encoder, DRM_MODE_ENCODER_TMDS);
 	if (ret) {
 		drm_err(dev, "init dp encoder failed: %d\n", ret);
 		return ret;
@@ -239,6 +246,7 @@ int hibmc_dp_init(struct hibmc_drm_private *priv)
 
 	drm_connector_attach_encoder(connector, encoder);
 
+	hibmc_debugfs_init(connector);
 	connector->polled = DRM_CONNECTOR_POLL_HPD;
 
 	return 0;

@@ -37,6 +37,9 @@ struct hibmc_vdac {
 struct hibmc_drm_private {
 	/* hw */
 	void __iomem   *mmio;
+	void __iomem   *fb_map;
+	resource_size_t  fb_base;
+	resource_size_t  fb_size;
 
 	/* drm */
 	struct drm_device dev;
@@ -74,7 +77,7 @@ int hibmc_ddc_create(struct drm_device *drm_dev, struct hibmc_vdac *connector);
 void hibmc_ddc_del(struct hibmc_vdac *vdac);
 int hibmc_dp_init(struct hibmc_drm_private *priv);
 
-void hibmc_debugfs_init(struct drm_connector *connector, struct dentry *root);
+void hibmc_debugfs_init(struct drm_connector *connector);
 
 irqreturn_t hibmc_dp_hpd_isr(int irq, void *arg);
 
