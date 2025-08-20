@@ -518,7 +518,7 @@ static int power_meter_write(struct device *dev, enum hwmon_sensor_types type,
 	return ret;
 }
 
-static const struct hwmon_channel_info * const power_meter_info[] = {
+static const struct hwmon_channel_info *power_meter_info[] = {
 	HWMON_CHANNEL_INFO(power, HWMON_P_AVERAGE |
 		HWMON_P_AVERAGE_INTERVAL | HWMON_P_AVERAGE_INTERVAL_MIN |
 		HWMON_P_AVERAGE_INTERVAL_MAX | HWMON_P_CAP | HWMON_P_CAP_MIN |
