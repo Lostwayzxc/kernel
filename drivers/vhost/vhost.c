@@ -2598,11 +2598,13 @@ int vhost_get_vq_desc(struct vhost_virtqueue *vq,
 
 	if (vq->avail_idx == vq->last_avail_idx) {
 		ret = vhost_get_avail_idx(vq);
-	if (unlikely(ret < 0))
-		return ret;
+		if (unlikely(ret < 0)) {
+			return ret;
+		}
 
-		if (!ret)
+		if (!ret) {
 			return vq->num;
+		}
 	}
 
 	/* Grab the next descriptor number they're advertising, and increment
