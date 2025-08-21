@@ -3,10 +3,10 @@
  * Copyright (c) 2022, Oracle and/or its affiliates.
  * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved
  */
+#include <linux/highmem.h>
 #include <linux/iova_bitmap.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
-#include <linux/highmem.h>
 
 #define BITS_PER_PAGE (PAGE_SIZE * BITS_PER_BYTE)
 
@@ -113,6 +113,9 @@ struct iova_bitmap {
 
 	/* length of the IOVA range for the whole bitmap */
 	size_t length;
+
+	/* length of the IOVA range set ahead the pinned pages */
+	unsigned long set_ahead_length;
 };
 
 /*
@@ -269,6 +272,7 @@ err:
 	iova_bitmap_free(bitmap);
 	return ERR_PTR(rc);
 }
+EXPORT_SYMBOL_NS_GPL(iova_bitmap_alloc, IOMMUFD);
 
 /**
  * iova_bitmap_free() - Frees an IOVA bitmap object
@@ -290,6 +294,7 @@ void iova_bitmap_free(struct iova_bitmap *bitmap)
 
 	kfree(bitmap);
 }
+EXPORT_SYMBOL_NS_GPL(iova_bitmap_free, IOMMUFD);
 
 /*
  * Returns the remaining bitmap indexes from mapped_total_index to process for
@@ -340,6 +345,32 @@ static bool iova_bitmap_done(struct iova_bitmap *bitmap)
 	return bitmap->mapped_base_index >= bitmap->mapped_total_index;
 }
 
+static int iova_bitmap_set_ahead(struct iova_bitmap *bitmap,
+				 unsigned long set_ahead_length)
+{
+	int ret = 0;
+
+	while (set_ahead_length > 0 && !iova_bitmap_done(bitmap)) {
+		unsigned long length = iova_bitmap_mapped_length(bitmap);
+		unsigned long iova = iova_bitmap_mapped_iova(bitmap);
+
+		ret = iova_bitmap_get(bitmap);
+		if (ret)
+			break;
+
+		length = min(length, set_ahead_length);
+		iova_bitmap_set(bitmap, iova, length);
+
+		set_ahead_length -= length;
+		bitmap->mapped_base_index +=
+			iova_bitmap_offset_to_index(bitmap, length - 1) + 1;
+		iova_bitmap_put(bitmap);
+	}
+
+	bitmap->set_ahead_length = 0;
+	return ret;
+}
+
 /*
  * Advances to the next range, releases the current pinned
  * pages and pins the next set of bitmap pages.
@@ -355,6 +386,15 @@ static int iova_bitmap_advance(struct iova_bitmap *bitmap)
 	iova_bitmap_put(bitmap);
 	if (iova_bitmap_done(bitmap))
 		return 0;
+
+	/* Iterate, set and skip any bits requested for next iteration */
+	if (bitmap->set_ahead_length) {
+		int ret;
+
+		ret = iova_bitmap_set_ahead(bitmap, bitmap->set_ahead_length);
+		if (ret)
+			return ret;
+	}
 
 	/* When advancing the index we pin the next set of bitmap pages */
 	return iova_bitmap_get(bitmap);
@@ -388,6 +428,7 @@ int iova_bitmap_for_each(struct iova_bitmap *bitmap, void *opaque,
 
 	return ret;
 }
+EXPORT_SYMBOL_NS_GPL(iova_bitmap_for_each, IOMMUFD);
 
 /**
  * iova_bitmap_set() - Records an IOVA range in bitmap
@@ -424,5 +465,10 @@ void iova_bitmap_set(struct iova_bitmap *bitmap,
 		kunmap_local(kaddr);
 		cur_bit += nbits;
 	} while (cur_bit <= last_bit);
+
+	if (unlikely(cur_bit <= last_bit)) {
+		bitmap->set_ahead_length =
+			((last_bit - cur_bit + 1) << bitmap->mapped.pgshift);
+	}
 }
-EXPORT_SYMBOL_GPL(iova_bitmap_set);
+EXPORT_SYMBOL_NS_GPL(iova_bitmap_set, IOMMUFD);
