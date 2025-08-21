@@ -1419,9 +1419,6 @@ PMUV3_INIT_SIMPLE(armv8_cortex_a78)
 PMUV3_INIT_SIMPLE(armv8_neoverse_e1)
 PMUV3_INIT_SIMPLE(armv8_neoverse_n1)
 
-PMUV3_INIT_SIMPLE(armv8_nvidia_carmel)
-PMUV3_INIT_SIMPLE(armv8_nvidia_denver)
-
 static int armv8_a35_pmu_init(struct arm_pmu *cpu_pmu)
 {
 	return armv8_pmu_init(cpu_pmu, "armv8_cortex_a35", armv8_a53_map_event);
